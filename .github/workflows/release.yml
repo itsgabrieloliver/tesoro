@@ -58,16 +58,24 @@ jobs:
           name: tesoro-${{ matrix.target }}
           path: dist/tesoro-${{ matrix.target }}.tar.gz*
 
-      - name: scp to nubo volume (uploader frame)
-        if: ${{ env.UPLOAD_HOST != '' }}
-        env:
-          UPLOAD_HOST: ${{ secrets.UPLOAD_HOST }}
-        uses: appleboy/scp-action@v0.1.7
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          host: ${{ secrets.UPLOAD_HOST }}
-          port: ${{ secrets.UPLOAD_PORT || 22 }}
-          username: deploy
-          key: ${{ secrets.UPLOAD_SSH_KEY }}
-          source: "dist/tesoro-${{ matrix.target }}.tar.gz*"
-          target: "/var/lib/tesoro/downloads/"
-          strip_components: 1
+          path: dist
+          merge-multiple: true
+
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tesoro-*.tar.gz
+            dist/tesoro-*.tar.gz.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
