@@ -1,0 +1,73 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            cross: false
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            cross: false
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: install cross
+        if: matrix.cross
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross
+
+      - name: build (native)
+        if: matrix.cross == false
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: build (cross)
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: package
+        run: |
+          mkdir -p dist
+          tar -czf dist/tesoro-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release teso
+          ( cd dist && shasum -a 256 tesoro-${{ matrix.target }}.tar.gz > tesoro-${{ matrix.target }}.tar.gz.sha256 ) || true
+
+      - name: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tesoro-${{ matrix.target }}
+          path: dist/tesoro-${{ matrix.target }}.tar.gz*
+
+      - name: scp to nubo volume (uploader frame)
+        if: ${{ env.UPLOAD_HOST != '' }}
+        env:
+          UPLOAD_HOST: ${{ secrets.UPLOAD_HOST }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.UPLOAD_HOST }}
+          port: ${{ secrets.UPLOAD_PORT || 22 }}
+          username: deploy
+          key: ${{ secrets.UPLOAD_SSH_KEY }}
+          source: "dist/tesoro-${{ matrix.target }}.tar.gz*"
+          target: "/var/lib/tesoro/downloads/"
+          strip_components: 1

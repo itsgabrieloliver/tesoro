@@ -1,0 +1,19 @@
+[project]
+id = "tesoro-site"
+name = "Tesoro"
+version = "0.1.0"
+
+[build]
+exclude = ["README.md"]
+
+[[build.env]]
+name = "BP_WEB_SERVER"
+value = "httpd"
+
+[[build.env]]
+name = "BP_WEB_SERVER_ROOT"
+value = "."
+
+[[build.env]]
+name = "BPE_PORT"
+value = "8080"

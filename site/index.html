@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>tesoro · markdown notes in your terminal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="A vim-style terminal TUI for your markdown vault. Embedded editor, wikilinks, full-text search, backlinks, graph view." />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>tesoro</h1>
+        <p class="tag">Obsidian-compatible notes in your terminal.</p>
+      </header>
+
+      <section class="intro">
+        <p>
+          A vim-style TUI for your markdown vault. Read styled markdown, follow
+          <code>[[wikilinks]]</code>, edit in place, search, link, and never leave the terminal.
+        </p>
+      </section>
+
+      <section class="features">
+        <h2>What you get</h2>
+        <ul>
+          <li>Embedded vim layer: normal, insert, visual modes with operator-pending (<code>diw</code>, <code>dd</code>, <code>yiw</code>, etc.)</li>
+          <li>System clipboard wired to <code>y</code>, <code>d</code>, and <code>p</code> across all modes</li>
+          <li>Up/Down jump between wikilinks; <code>Enter</code> follows; missing notes are created on follow</li>
+          <li>Link concealment: <code>[[Target|Display]]</code> renders as colored <code>Display</code> until the cursor lands on it</li>
+          <li>Fuzzy quick-switcher, full-text search, content grep, tag browser, daily notes, templates</li>
+          <li>Backlinks panel and a connectivity graph view</li>
+          <li>Configurable <code>&lt;Leader&gt;</code> key, pinned notes, autosave</li>
+        </ul>
+      </section>
+
+      <section class="download">
+        <h2>Download</h2>
+        <p>Binaries for tesoro <span class="version">v0.1.0</span>:</p>
+        <div class="targets">
+          <a href="downloads/tesoro-aarch64-apple-darwin.tar.gz">macOS · Apple Silicon</a>
+          <a href="downloads/tesoro-x86_64-apple-darwin.tar.gz">macOS · Intel</a>
+          <a href="downloads/tesoro-x86_64-unknown-linux-gnu.tar.gz">Linux · x86_64</a>
+          <a href="downloads/tesoro-aarch64-unknown-linux-gnu.tar.gz">Linux · aarch64</a>
+        </div>
+        <p class="install"><span class="dim">install</span> &nbsp;<code>tar -xzf tesoro-*.tar.gz &amp;&amp; mv teso /usr/local/bin/</code></p>
+        <p class="run"><span class="dim">run</span> &nbsp;<code>teso ~/path/to/your/vault</code></p>
+      </section>
+
+      <section class="config">
+        <h2>Configure</h2>
+        <p>
+          Drop a <code>config.json</code> in your platform config dir
+          (<code>~/Library/Application Support/onl.nubo.tesoro/</code> on macOS).
+          Default leader is <code>ctrl</code>; set <code>space</code> if you prefer two-step bindings:
+        </p>
+        <pre><code>{ "leader": "space" }</code></pre>
+      </section>
+
+      <footer>
+        <p>
+          made by <a href="https://github.com/itsgabrieloliver">Gabriel Oliver</a>
+          &nbsp;·&nbsp;
+          deployed with <a href="https://withnubo.com">Nubo</a>
+        </p>
+        <p class="stack">rust · ratatui · tui-textarea · nucleo · pulldown-cmark</p>
+      </footer>
+    </main>
+  </body>
+</html>
