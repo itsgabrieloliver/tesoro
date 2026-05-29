@@ -1395,8 +1395,27 @@ impl App {
 
     fn graph_key(&mut self, key: KeyEvent) {
         let len = self.graph.as_ref().map(|g| g.list.len()).unwrap_or(0);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Esc => self.graph = None,
+            KeyCode::Tab => {
+                if let Some(g) = self.graph.as_mut()
+                    && len > 0
+                {
+                    if shift {
+                        g.sel = if g.sel == 0 { len - 1 } else { g.sel - 1 };
+                    } else {
+                        g.sel = (g.sel + 1) % len;
+                    }
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(g) = self.graph.as_mut()
+                    && len > 0
+                {
+                    g.sel = if g.sel == 0 { len - 1 } else { g.sel - 1 };
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(g) = self.graph.as_mut()
                     && len > 0

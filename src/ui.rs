@@ -499,46 +499,27 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     f.render_widget(Clear, area);
-    let block = Block::bordered()
-        .border_style(theme::brand())
-        .title(" graph — most connected (enter:open  esc:close) ");
+    let selected_note_idx = g.list.get(g.sel).copied();
+    let title = if let Some(ni) = selected_note_idx {
+        let t = app
+            .vault
+            .notes
+            .get(ni)
+            .map(|n| n.title.as_str())
+            .unwrap_or("?");
+        let back = app.vault.backlinks(ni).len();
+        let out = app.vault.outbound(ni).len();
+        format!(" constellation - {t}  ({back} in, {out} out)  tab:next  enter:open  esc:close ")
+    } else {
+        " constellation  tab:next  enter:open  esc:close ".to_string()
+    };
+    let block = Block::bordered().border_style(theme::brand()).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let height = inner.height as usize;
-    let start = g.sel.saturating_sub(height.saturating_sub(1));
-    let items: Vec<ListItem> = g
-        .list
-        .iter()
-        .skip(start)
-        .take(height)
-        .enumerate()
-        .map(|(vis, &ni)| {
-            let abs = start + vis;
-            let title = app
-                .vault
-                .notes
-                .get(ni)
-                .map(|n| n.title.as_str())
-                .unwrap_or("?");
-            let back = app.vault.backlinks(ni).len();
-            let out = app.vault.outbound(ni).len();
-            let style = if abs == g.sel {
-                theme::selected()
-            } else {
-                theme::text()
-            };
-            let mut spans = vec![
-                Span::styled(format!("{title}  "), style),
-                Span::styled(format!("←{back} →{out}  "), theme::muted()),
-            ];
-            if back == 0 && out == 0 {
-                spans.push(Span::styled("orphan", theme::faint()));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-    f.render_widget(List::new(items), inner);
+    let lines = crate::graphview::render_constellation(&app.vault, selected_note_idx, inner);
+    let para = Paragraph::new(lines).style(theme::text());
+    f.render_widget(para, inner);
 }
 
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
@@ -860,7 +841,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(app.graph.is_some());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(terminal.backend().buffer()).contains("most connected"));
+        assert!(buffer_text(terminal.backend().buffer()).contains("constellation"));
 
         app.on_key(key(KeyCode::Enter));
         assert!(app.graph.is_none());

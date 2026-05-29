@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod editor;
 mod event;
+mod graphview;
 mod logging;
 mod markdown;
 mod picker;
