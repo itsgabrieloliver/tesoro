@@ -499,25 +499,21 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     f.render_widget(Clear, area);
-    let selected_note_idx = g.list.get(g.sel).copied();
-    let title = if let Some(ni) = selected_note_idx {
-        let t = app
-            .vault
-            .notes
-            .get(ni)
-            .map(|n| n.title.as_str())
-            .unwrap_or("?");
-        let back = app.vault.backlinks(ni).len();
-        let out = app.vault.outbound(ni).len();
-        format!(" constellation - {t}  ({back} in, {out} out)  tab:next  enter:open  esc:close ")
-    } else {
-        " constellation  tab:next  enter:open  esc:close ".to_string()
-    };
+    let root_title = app
+        .vault
+        .notes
+        .get(g.root_idx)
+        .map(|n| n.title.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let title = format!(
+        " tree - {root_title}  (↑↓ move  →/l expand  ←/h collapse  enter:open  esc:close) "
+    );
     let block = Block::bordered().border_style(theme::brand()).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines = crate::graphview::render_constellation(&app.vault, selected_note_idx, inner);
+    let lines = crate::graphview::render_tree(&app.vault, &g.visible, &g.expanded, g.sel, inner);
     let para = Paragraph::new(lines).style(theme::text());
     f.render_widget(para, inner);
 }
@@ -841,7 +837,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(app.graph.is_some());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(terminal.backend().buffer()).contains("constellation"));
+        assert!(buffer_text(terminal.backend().buffer()).contains("tree"));
 
         app.on_key(key(KeyCode::Enter));
         assert!(app.graph.is_none());

@@ -102,8 +102,62 @@ pub struct SearchState {
 }
 
 pub struct GraphView {
-    pub list: Vec<usize>,
+    pub root_idx: usize,
+    pub expanded: HashSet<Vec<usize>>,
+    pub visible: Vec<TreeRow>,
     pub sel: usize,
+}
+
+#[derive(Clone)]
+pub struct TreeRow {
+    pub note_idx: usize,
+    pub path: Vec<usize>,
+    pub depth: usize,
+    pub has_children: bool,
+    pub is_last_at_levels: Vec<bool>,
+}
+
+fn graph_build_visible(
+    vault: &crate::vault::Vault,
+    root_idx: usize,
+    expanded: &HashSet<Vec<usize>>,
+) -> Vec<TreeRow> {
+    fn rec(
+        vault: &crate::vault::Vault,
+        note_idx: usize,
+        path: Vec<usize>,
+        depth: usize,
+        levels: Vec<bool>,
+        expanded: &HashSet<Vec<usize>>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        let children: Vec<usize> = vault
+            .outbound(note_idx)
+            .into_iter()
+            .filter(|c| !path.contains(c))
+            .collect();
+        let has_children = !children.is_empty();
+        rows.push(TreeRow {
+            note_idx,
+            path: path.clone(),
+            depth,
+            has_children,
+            is_last_at_levels: levels.clone(),
+        });
+        if expanded.contains(&path) {
+            for (k, &child) in children.iter().enumerate() {
+                let is_last = k + 1 == children.len();
+                let mut new_levels = levels.clone();
+                new_levels.push(is_last);
+                let mut new_path = path.clone();
+                new_path.push(child);
+                rec(vault, child, new_path, depth + 1, new_levels, expanded, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    rec(vault, root_idx, vec![root_idx], 0, Vec::new(), expanded, &mut rows);
+    rows
 }
 
 const COMMANDS: &[&str] = &[
@@ -1382,55 +1436,77 @@ impl App {
     }
 
     fn open_graph(&mut self) {
+        let root_idx = self
+            .open
+            .as_ref()
+            .map(|o| o.idx)
+            .or_else(|| self.vault.most_connected().first().copied())
+            .unwrap_or(0);
+        if self.vault.notes.is_empty() {
+            return;
+        }
+        let mut expanded: HashSet<Vec<usize>> = HashSet::new();
+        expanded.insert(vec![root_idx]);
+        let visible = graph_build_visible(&self.vault, root_idx, &expanded);
         self.graph = Some(GraphView {
-            list: self.vault.most_connected(),
+            root_idx,
+            expanded,
+            visible,
             sel: 0,
         });
     }
 
     fn graph_key(&mut self, key: KeyEvent) {
-        let len = self.graph.as_ref().map(|g| g.list.len()).unwrap_or(0);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let Some(g) = self.graph.as_mut() else { return };
         match key.code {
             KeyCode::Esc => self.graph = None,
-            KeyCode::Tab => {
-                if let Some(g) = self.graph.as_mut()
-                    && len > 0
-                {
-                    if shift {
-                        g.sel = if g.sel == 0 { len - 1 } else { g.sel - 1 };
-                    } else {
-                        g.sel = (g.sel + 1) % len;
+            KeyCode::Up | KeyCode::Char('k') => {
+                if g.sel > 0 {
+                    g.sel -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if g.sel + 1 < g.visible.len() {
+                    g.sel += 1;
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let row = g.visible.get(g.sel).cloned();
+                if let Some(row) = row {
+                    if row.has_children && !g.expanded.contains(&row.path) {
+                        g.expanded.insert(row.path);
+                        g.visible = graph_build_visible(&self.vault, g.root_idx, &g.expanded);
+                    } else if g.sel + 1 < g.visible.len() {
+                        g.sel += 1;
                     }
                 }
             }
-            KeyCode::BackTab => {
-                if let Some(g) = self.graph.as_mut()
-                    && len > 0
-                {
-                    g.sel = if g.sel == 0 { len - 1 } else { g.sel - 1 };
-                }
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(g) = self.graph.as_mut()
-                    && len > 0
-                {
-                    g.sel = (g.sel + 1).min(len - 1);
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(g) = self.graph.as_mut() {
-                    g.sel = g.sel.saturating_sub(1);
+            KeyCode::Left | KeyCode::Char('h') => {
+                let row = g.visible.get(g.sel).cloned();
+                if let Some(row) = row {
+                    if g.expanded.contains(&row.path) {
+                        g.expanded.remove(&row.path);
+                        g.visible = graph_build_visible(&self.vault, g.root_idx, &g.expanded);
+                    } else if row.depth > 0 {
+                        let parent_path = row.path[..row.path.len() - 1].to_vec();
+                        if let Some(idx) = g
+                            .visible
+                            .iter()
+                            .position(|r| r.path == parent_path)
+                        {
+                            g.sel = idx;
+                        }
+                    }
                 }
             }
             KeyCode::Enter => {
-                let idx = self.graph.as_ref().and_then(|g| g.list.get(g.sel).copied());
+                let target = g.visible.get(g.sel).map(|r| r.note_idx);
                 self.graph = None;
-                let path = idx
-                    .and_then(|i| self.vault.notes.get(i))
-                    .map(|n| n.path.clone());
-                if let Some(path) = path {
-                    self.open_path(&path);
+                if let Some(i) = target {
+                    if let Some(note) = self.vault.notes.get(i) {
+                        let path = note.path.clone();
+                        self.open_path(&path);
+                    }
                 }
             }
             _ => {}
