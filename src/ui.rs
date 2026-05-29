@@ -1,5 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
@@ -230,7 +231,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         theme::border()
     };
-    let (title_str, mode_label) = {
+    let (title_str, mode_label, dirty) = {
         let o = app.open.as_ref().unwrap();
         let t = app
             .vault
@@ -243,11 +244,23 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             EditMode::Insert => "INSERT",
             EditMode::Visual => "VISUAL",
         };
-        (t, label)
+        (t, label, o.dirty)
     };
-    let block = Block::bordered()
-        .border_style(border)
-        .title(format!(" {title_str}  [{mode_label}] "));
+    let border = if dirty { theme::warn() } else { border };
+    let title_line = if dirty {
+        Line::from(vec![
+            Span::styled(" ● ", theme::warn().add_modifier(Modifier::BOLD)),
+            Span::styled(title_str, theme::warn().add_modifier(Modifier::BOLD)),
+            Span::styled("  [", theme::muted()),
+            Span::styled(mode_label, theme::muted()),
+            Span::styled("]  ", theme::muted()),
+            Span::styled("UNSAVED", theme::warn().add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+            Span::raw(" "),
+        ])
+    } else {
+        Line::from(vec![Span::raw(format!(" {title_str}  [{mode_label}] "))])
+    };
+    let block = Block::bordered().border_style(border).title(title_line);
     let inner = block.inner(area);
     f.render_widget(block, area);
 

@@ -168,6 +168,31 @@ pub struct TreeRow {
     pub is_last_at_levels: Vec<bool>,
 }
 
+pub fn toggle_checkbox_line(line: &str) -> Option<String> {
+    let lead: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let rest = &line[lead.len()..];
+    let (bullet, after) = if let Some(s) = rest.strip_prefix("- ") {
+        ("- ", s)
+    } else if let Some(s) = rest.strip_prefix("* ") {
+        ("* ", s)
+    } else if let Some(s) = rest.strip_prefix("+ ") {
+        ("+ ", s)
+    } else {
+        return None;
+    };
+    let tail = if let Some(after_box) = after.strip_prefix("[ ]") {
+        format!("[x]{after_box}")
+    } else if let Some(after_box) = after
+        .strip_prefix("[x]")
+        .or_else(|| after.strip_prefix("[X]"))
+    {
+        format!("[ ]{after_box}")
+    } else {
+        format!("[ ] {after}")
+    };
+    Some(format!("{lead}{bullet}{tail}"))
+}
+
 fn graph_build_visible(
     vault: &crate::vault::Vault,
     root_idx: usize,
@@ -249,6 +274,7 @@ pub struct App {
     pub leader_pending: bool,
     pub pinned: HashSet<PathBuf>,
     pub delete_pending: bool,
+    pub format_on_save: bool,
     suppress: HashMap<PathBuf, Instant>,
 }
 
@@ -310,6 +336,7 @@ impl App {
             leader_pending: false,
             pinned,
             delete_pending: false,
+            format_on_save: true,
             suppress: HashMap::new(),
         }
     }
@@ -499,7 +526,6 @@ impl App {
             Focus::Sidebar => self.focus = Focus::Reader,
             Focus::Reader => {
                 if self.show_sidebar {
-                    self.save_open();
                     self.focus = Focus::Sidebar;
                 }
             }
@@ -626,7 +652,6 @@ impl App {
             KeyCode::Enter => return self.follow_link_under_cursor(),
             KeyCode::Tab | KeyCode::Esc => {
                 if self.show_sidebar {
-                    self.save_open();
                     self.focus = Focus::Sidebar;
                 }
                 return;
@@ -1931,10 +1956,33 @@ impl App {
         if !text.ends_with('\n') {
             text.push('\n');
         }
+        if self.format_on_save {
+            text = crate::format::format_markdown(&text);
+        }
         self.suppress(&path);
-        let _ = std::fs::write(&path, text);
+        let _ = std::fs::write(&path, &text);
         self.vault.reload(&path);
         if let Some(o) = self.open.as_mut() {
+            if self.format_on_save {
+                let (cr, cc) = o.textarea.cursor();
+                let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+                let lines = if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+                    lines[..lines.len() - 1].to_vec()
+                } else {
+                    lines
+                };
+                let mut ta = tui_textarea::TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+                ta.set_cursor_line_style(ratatui::style::Style::default());
+                ta.set_selection_style(
+                    ratatui::style::Style::default()
+                        .bg(ratatui::style::Color::Indexed(238))
+                        .fg(ratatui::style::Color::Indexed(255)),
+                );
+                let new_row = cr.min(ta.lines().len().saturating_sub(1));
+                let new_col = cc.min(ta.lines().get(new_row).map(|l| l.chars().count()).unwrap_or(0));
+                ta.move_cursor(tui_textarea::CursorMove::Jump(new_row as u16, new_col as u16));
+                o.textarea = ta;
+            }
             o.dirty = false;
         }
     }
@@ -2036,8 +2084,25 @@ impl App {
                 self.open_graph();
                 true
             }
+            KeyCode::Char('x') => {
+                self.toggle_checkbox();
+                true
+            }
             _ => false,
         }
+    }
+
+    fn toggle_checkbox(&mut self) {
+        let Some(o) = self.open.as_mut() else { return };
+        let (row, col) = o.textarea.cursor();
+        let line = o.textarea.lines().get(row).cloned().unwrap_or_default();
+        let Some(new_line) = toggle_checkbox_line(&line) else { return };
+        o.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
+        o.textarea.delete_line_by_end();
+        o.textarea.insert_str(new_line.clone());
+        let new_col = col.min(new_line.chars().count());
+        o.textarea.move_cursor(CursorMove::Jump(row as u16, new_col as u16));
+        o.dirty = true;
     }
 
     fn is_leader_context(&self) -> bool {

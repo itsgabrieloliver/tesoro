@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod editor;
 mod event;
+mod format;
 mod graphview;
 mod logging;
 mod markdown;
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
     let mut app = app::App::new(vault);
     let leader = app::parse_leader(config.leader.as_deref().unwrap_or("ctrl"));
     app.set_leader(leader);
+    app.format_on_save = config.format_on_save;
     app.open_welcome_in_preview();
     tui::run(app)
 }
