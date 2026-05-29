@@ -122,6 +122,50 @@ pre code {
   margin: 12px 0 0;
 }
 
+.one-liner {
+  margin: 0 0 14px;
+  font-size: 0.95em;
+  user-select: all;
+}
+
+.one-liner code {
+  color: var(--green);
+}
+
+details {
+  margin-top: 28px;
+}
+
+details > summary {
+  cursor: pointer;
+  font-size: 0.9em;
+  padding: 6px 0;
+  list-style: none;
+}
+
+details > summary::before {
+  content: "\203A  ";
+  display: inline-block;
+  width: 1em;
+  transition: transform 0.15s;
+}
+
+details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+details > summary:hover {
+  color: var(--muted);
+}
+
+details p {
+  margin: 12px 0 0;
+}
+
+details a {
+  color: inherit;
+}
+
 .version {
   color: var(--muted);
   font-size: 0.9em;
