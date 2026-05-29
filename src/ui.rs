@@ -63,6 +63,49 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.graph.is_some() {
         draw_graph(f, app, f.area());
     }
+    if app.slash.is_some() {
+        draw_slash(f, app, f.area());
+    }
+}
+
+fn draw_slash(f: &mut Frame, app: &App, area: Rect) {
+    let Some(menu) = &app.slash else {
+        return;
+    };
+    let item_count = menu.items.len().max(1);
+    let panel_h: u16 = (item_count as u16 + 2).min(10);
+    let panel_w: u16 = 44.min(area.width.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(panel_w + 2);
+    let y = area.y + area.height.saturating_sub(panel_h + 2);
+    let rect = Rect { x, y, width: panel_w, height: panel_h };
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_style(theme::brand())
+        .title(format!(" /{} ", menu.filter));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if menu.items.is_empty() {
+        let p = Paragraph::new(Line::from(Span::styled(
+            "no match".to_string(),
+            theme::faint(),
+        )));
+        f.render_widget(p, inner);
+        return;
+    }
+    let rows: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let style = if i == menu.sel { theme::selected() } else { theme::text() };
+            let muted = if i == menu.sel { theme::brand() } else { theme::muted() };
+            Line::from(vec![
+                Span::styled(format!(" /{:<10}", it.label), style),
+                Span::styled(it.description.to_string(), muted),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(rows), inner);
 }
 
 fn ensure_render(app: &mut App, width: u16) {

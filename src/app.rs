@@ -108,6 +108,53 @@ pub struct GraphView {
     pub sel: usize,
 }
 
+#[derive(Clone, Copy)]
+pub enum SlashKind {
+    Link,
+    Today,
+    Heading,
+    Code,
+    List,
+    Quote,
+    Divider,
+}
+
+#[derive(Clone)]
+pub struct SlashItem {
+    pub label: &'static str,
+    pub description: &'static str,
+    pub kind: SlashKind,
+}
+
+pub struct SlashMenu {
+    pub filter: String,
+    pub items: Vec<SlashItem>,
+    pub sel: usize,
+}
+
+pub fn slash_items() -> Vec<SlashItem> {
+    vec![
+        SlashItem { label: "link", description: "wrap word in [[…]] or insert empty link", kind: SlashKind::Link },
+        SlashItem { label: "today", description: "insert [[YYYY-MM-DD]] for today's daily", kind: SlashKind::Today },
+        SlashItem { label: "heading", description: "insert # heading prefix", kind: SlashKind::Heading },
+        SlashItem { label: "code", description: "insert ``` fenced code block", kind: SlashKind::Code },
+        SlashItem { label: "list", description: "insert - bullet", kind: SlashKind::List },
+        SlashItem { label: "quote", description: "insert > blockquote", kind: SlashKind::Quote },
+        SlashItem { label: "divider", description: "insert --- horizontal rule", kind: SlashKind::Divider },
+    ]
+}
+
+pub fn slash_filter(filter: &str) -> Vec<SlashItem> {
+    let all = slash_items();
+    if filter.is_empty() {
+        return all;
+    }
+    let needle = filter.to_lowercase();
+    all.into_iter()
+        .filter(|it| it.label.to_lowercase().starts_with(&needle))
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct TreeRow {
     pub note_idx: usize,
@@ -186,6 +233,7 @@ pub struct App {
     pub prompt: Option<Prompt>,
     pub palette: Option<Picker>,
     pub graph: Option<GraphView>,
+    pub slash: Option<SlashMenu>,
     pub show_panel: bool,
     pub show_sidebar: bool,
     pub edit_request: Option<PathBuf>,
@@ -246,6 +294,7 @@ impl App {
             prompt: None,
             palette: None,
             graph: None,
+            slash: None,
             show_panel: false,
             show_sidebar: true,
             edit_request: None,
@@ -644,6 +693,9 @@ impl App {
     }
 
     fn insert_key(&mut self, key: KeyEvent) {
+        if self.slash.is_some() {
+            return self.slash_key(key);
+        }
         if key.code == KeyCode::Esc {
             if let Some(o) = self.open.as_mut() {
                 o.mode = EditMode::Normal;
@@ -654,10 +706,165 @@ impl App {
             self.save_open();
             return;
         }
+        if key.code == KeyCode::Char('/')
+            && key.modifiers.is_empty()
+            && self.cursor_after_break()
+        {
+            self.slash = Some(SlashMenu {
+                filter: String::new(),
+                items: slash_items(),
+                sel: 0,
+            });
+        }
         if let Some(o) = self.open.as_mut()
             && o.textarea.input(key)
         {
             o.dirty = true;
+        }
+    }
+
+    fn cursor_after_break(&self) -> bool {
+        let Some(o) = self.open.as_ref() else { return false };
+        let (row, col) = o.textarea.cursor();
+        if col == 0 {
+            return true;
+        }
+        let lines = o.textarea.lines();
+        let chars: Vec<char> = lines
+            .get(row)
+            .map(|l| l.chars().collect())
+            .unwrap_or_default();
+        match chars.get(col - 1) {
+            Some(c) => c.is_whitespace(),
+            None => true,
+        }
+    }
+
+    fn slash_key(&mut self, key: KeyEvent) {
+        let Some(menu) = self.slash.as_mut() else { return };
+        match key.code {
+            KeyCode::Esc => {
+                self.slash = None;
+                return;
+            }
+            KeyCode::Up => {
+                if menu.sel > 0 {
+                    menu.sel -= 1;
+                }
+                return;
+            }
+            KeyCode::Down => {
+                if menu.sel + 1 < menu.items.len() {
+                    menu.sel += 1;
+                }
+                return;
+            }
+            KeyCode::Tab => {
+                if !menu.items.is_empty() {
+                    menu.sel = (menu.sel + 1) % menu.items.len();
+                }
+                return;
+            }
+            KeyCode::Enter => {
+                let kind = menu.items.get(menu.sel).map(|it| it.kind);
+                let filter_chars = menu.filter.chars().count();
+                self.slash = None;
+                self.delete_slash_text(filter_chars);
+                if let Some(k) = kind {
+                    self.execute_slash(k);
+                }
+                return;
+            }
+            KeyCode::Backspace => {
+                if menu.filter.is_empty() {
+                    self.slash = None;
+                    if let Some(o) = self.open.as_mut() {
+                        o.textarea.delete_char();
+                        o.dirty = true;
+                    }
+                    return;
+                }
+                menu.filter.pop();
+                menu.items = slash_filter(&menu.filter);
+                if menu.items.is_empty() {
+                    menu.sel = 0;
+                } else if menu.sel >= menu.items.len() {
+                    menu.sel = menu.items.len() - 1;
+                }
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.delete_char();
+                    o.dirty = true;
+                }
+                return;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                menu.filter.push(c);
+                menu.items = slash_filter(&menu.filter);
+                if menu.items.is_empty() {
+                    menu.sel = 0;
+                } else if menu.sel >= menu.items.len() {
+                    menu.sel = menu.items.len() - 1;
+                }
+                if let Some(o) = self.open.as_mut()
+                    && o.textarea.input(key)
+                {
+                    o.dirty = true;
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    fn delete_slash_text(&mut self, filter_chars: usize) {
+        let Some(o) = self.open.as_mut() else { return };
+        for _ in 0..(filter_chars + 1) {
+            o.textarea.delete_char();
+        }
+        o.dirty = true;
+    }
+
+    fn execute_slash(&mut self, kind: SlashKind) {
+        match kind {
+            SlashKind::Link => self.make_link(),
+            SlashKind::Today => {
+                let stamp = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str(format!("[[{stamp}]]"));
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Heading => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("# ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Code => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("```\n\n```");
+                    o.textarea.move_cursor(CursorMove::Up);
+                    o.dirty = true;
+                }
+            }
+            SlashKind::List => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("- ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Quote => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("> ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Divider => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("\n---\n");
+                    o.dirty = true;
+                }
+            }
         }
     }
 
