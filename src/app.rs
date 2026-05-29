@@ -355,10 +355,6 @@ impl App {
                 self.open_palette();
                 return;
             }
-            KeyCode::Char('g') if ctrl => {
-                self.open_graph();
-                return;
-            }
             KeyCode::Char('b') if ctrl => {
                 self.show_panel = !self.show_panel;
                 return;
@@ -499,7 +495,6 @@ impl App {
         match key.code {
             KeyCode::Char('o') if ctrl => return self.open_switcher(),
             KeyCode::Char('p') if ctrl => return self.open_palette(),
-            KeyCode::Char('g') if ctrl => return self.open_graph(),
             KeyCode::Char('b') if ctrl => {
                 self.show_panel = !self.show_panel;
                 return;
@@ -1735,6 +1730,10 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 self.open_link_or_create_search();
+                true
+            }
+            KeyCode::Char('g') => {
+                self.open_graph();
                 true
             }
             _ => false,
