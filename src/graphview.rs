@@ -85,111 +85,38 @@ impl Canvas {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Pos {
-    x: f32,
-    y: f32,
+pub fn render_constellation(
+    vault: &Vault,
+    selected_note_idx: Option<usize>,
+    area: Rect,
+) -> Vec<Line<'static>> {
+    render_hyperbolic(vault, selected_note_idx, area)
 }
 
-fn layout(n: usize, edges: &[(usize, usize)]) -> Vec<Pos> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut pos: Vec<Pos> = (0..n)
-        .map(|i| {
-            let theta = (i as f32) * std::f32::consts::TAU / (n as f32);
-            Pos { x: theta.cos(), y: theta.sin() }
-        })
-        .collect();
-
-    let k = (1.0_f32 / n as f32).sqrt().max(0.05);
-    let iterations = 80usize;
-
-    for it in 0..iterations {
-        let t = 0.18 * (1.0 - it as f32 / iterations as f32).max(0.05);
-        let mut disp = vec![Pos { x: 0.0, y: 0.0 }; n];
-
-        for i in 0..n {
-            for j in 0..n {
-                if i == j {
-                    continue;
-                }
-                let dx = pos[i].x - pos[j].x;
-                let dy = pos[i].y - pos[j].y;
-                let dist = (dx * dx + dy * dy).sqrt().max(1e-3);
-                let force = k * k / dist;
-                disp[i].x += dx / dist * force;
-                disp[i].y += dy / dist * force;
-            }
-        }
-
-        for &(i, j) in edges {
-            let dx = pos[i].x - pos[j].x;
-            let dy = pos[i].y - pos[j].y;
-            let dist = (dx * dx + dy * dy).sqrt().max(1e-3);
-            let force = dist * dist / k;
-            disp[i].x -= dx / dist * force;
-            disp[i].y -= dy / dist * force;
-            disp[j].x += dx / dist * force;
-            disp[j].y += dy / dist * force;
-        }
-
-        for i in 0..n {
-            let d = (disp[i].x * disp[i].x + disp[i].y * disp[i].y).sqrt().max(1e-3);
-            pos[i].x += disp[i].x / d * d.min(t);
-            pos[i].y += disp[i].y / d * d.min(t);
-            pos[i].x = pos[i].x.clamp(-1.5, 1.5);
-            pos[i].y = pos[i].y.clamp(-1.5, 1.5);
-        }
+pub fn render_hyperbolic(
+    vault: &Vault,
+    selected_note_idx: Option<usize>,
+    area: Rect,
+) -> Vec<Line<'static>> {
+    if area.width < 6 || area.height < 4 {
+        return vec![Line::from(Span::styled(
+            "tight on space, widen the window".to_string(),
+            theme::faint(),
+        ))];
     }
 
-    pos
-}
-
-fn normalize(pos: &[Pos], cols: i32, rows: i32, pad: i32) -> Vec<(i32, i32)> {
-    if pos.is_empty() {
-        return Vec::new();
-    }
-    let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-    let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-    for p in pos {
-        min_x = min_x.min(p.x);
-        max_x = max_x.max(p.x);
-        min_y = min_y.min(p.y);
-        max_y = max_y.max(p.y);
-    }
-    let span_x = (max_x - min_x).max(1e-3);
-    let span_y = (max_y - min_y).max(1e-3);
-    let usable_w = (cols - 2 * pad).max(1) as f32;
-    let usable_h = (rows - 2 * pad).max(1) as f32;
-    pos.iter()
-        .map(|p| {
-            let nx = (p.x - min_x) / span_x;
-            let ny = (p.y - min_y) / span_y;
-            (
-                pad + (nx * usable_w) as i32,
-                pad + (ny * usable_h) as i32,
-            )
-        })
-        .collect()
-}
-
-pub struct GraphLayout {
-    pub note_idx: Vec<usize>,
-    pub degree: Vec<usize>,
-    pub dot_pos: Vec<(i32, i32)>,
-    pub cell_cols: usize,
-    pub cell_rows: usize,
-}
-
-pub fn build_layout(vault: &Vault, area: Rect) -> GraphLayout {
     let cell_cols = area.width as usize;
     let cell_rows = area.height as usize;
     let dot_w = (cell_cols * 2) as i32;
     let dot_h = (cell_rows * 4) as i32;
 
     let n = vault.notes.len();
-    let note_idx: Vec<usize> = (0..n).collect();
+    if n == 0 {
+        return vec![Line::from(Span::styled(
+            "no notes yet, create one with <Leader>n".to_string(),
+            theme::faint(),
+        ))];
+    }
 
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for i in 0..n {
@@ -205,57 +132,107 @@ pub fn build_layout(vault: &Vault, area: Rect) -> GraphLayout {
         .map(|i| vault.backlinks(i).len() + vault.outbound(i).len())
         .collect();
 
-    let positions = layout(n, &edges);
-    let dot_pos = normalize(&positions, dot_w, dot_h, 4);
-
-    GraphLayout {
-        note_idx,
-        degree,
-        dot_pos,
-        cell_cols,
-        cell_rows,
-    }
-}
-
-pub fn render_constellation(
-    vault: &Vault,
-    selected_note_idx: Option<usize>,
-    area: Rect,
-) -> Vec<Line<'static>> {
-    if area.width < 4 || area.height < 3 {
-        return vec![Line::from(Span::styled(
-            "tight on space — widen the window".to_string(),
-            theme::faint(),
-        ))];
-    }
-
-    let gl = build_layout(vault, area);
-    if gl.note_idx.is_empty() {
-        return vec![Line::from(Span::styled(
-            "no notes yet — create one with <Leader>n".to_string(),
-            theme::faint(),
-        ))];
-    }
-
-    let mut canvas = Canvas::new(gl.cell_cols, gl.cell_rows);
-
-    for i in 0..gl.note_idx.len() {
-        for j in (i + 1)..gl.note_idx.len() {
-            let out_i = vault.outbound(gl.note_idx[i]);
-            let connected =
-                out_i.contains(&gl.note_idx[j]) || vault.outbound(gl.note_idx[j]).contains(&gl.note_idx[i]);
-            if connected {
-                let (x0, y0) = gl.dot_pos[i];
-                let (x1, y1) = gl.dot_pos[j];
-                canvas.line(x0, y0, x1, y1);
+    let focus_global = selected_note_idx.unwrap_or_else(|| {
+        let mut best = 0usize;
+        for i in 1..n {
+            if degree[i] > degree[best] {
+                best = i;
             }
+        }
+        best
+    });
+
+    let depth = bfs_depth(n, &edges, focus_global);
+
+    let max_depth = depth.iter().copied().filter_map(|d| d).max().unwrap_or(0).max(1);
+
+    let mut layer_buckets: Vec<Vec<usize>> = vec![Vec::new(); max_depth + 1];
+    let mut disconnected: Vec<usize> = Vec::new();
+    for i in 0..n {
+        match depth[i] {
+            Some(d) => layer_buckets[d].push(i),
+            None => disconnected.push(i),
+        }
+    }
+    for bucket in &mut layer_buckets {
+        bucket.sort_by(|&a, &b| degree[b].cmp(&degree[a]).then(a.cmp(&b)));
+    }
+    disconnected.sort_by(|&a, &b| degree[b].cmp(&degree[a]).then(a.cmp(&b)));
+
+    let mut pos: Vec<(f32, f32)> = vec![(0.0, 0.0); n];
+
+    pos[focus_global] = (0.0, 0.0);
+
+    for (layer_idx, bucket) in layer_buckets.iter().enumerate().skip(1) {
+        if bucket.is_empty() {
+            continue;
+        }
+        let r = (layer_idx as f32 / max_depth as f32 * 1.4).tanh() * 0.92;
+        let count = bucket.len();
+        for (k, &note_idx) in bucket.iter().enumerate() {
+            let theta = (k as f32 + 0.5) * std::f32::consts::TAU / count as f32
+                + layer_idx as f32 * 0.31;
+            pos[note_idx] = (r * theta.cos(), r * theta.sin());
         }
     }
 
-    for i in 0..gl.note_idx.len() {
-        let (x, y) = gl.dot_pos[i];
-        let deg = gl.degree[i];
-        let r = if deg >= 6 { 2 } else if deg >= 2 { 1 } else { 0 };
+    if !disconnected.is_empty() {
+        let r = 0.95;
+        for (k, &note_idx) in disconnected.iter().enumerate() {
+            let theta = (k as f32 + 0.5) * std::f32::consts::TAU / disconnected.len() as f32 + 1.1;
+            pos[note_idx] = (r * theta.cos(), r * theta.sin());
+        }
+    }
+
+    let cx = dot_w as f32 / 2.0;
+    let cy = dot_h as f32 / 2.0;
+    let pixel_aspect_y_per_x = 0.6;
+    let radius_dots = (cx.min(cy / pixel_aspect_y_per_x) - 2.0).max(4.0);
+
+    let dot_pos: Vec<(i32, i32)> = pos
+        .iter()
+        .map(|&(x, y)| {
+            (
+                (cx + x * radius_dots).round() as i32,
+                (cy + y * radius_dots * pixel_aspect_y_per_x).round() as i32,
+            )
+        })
+        .collect();
+
+    let mut canvas = Canvas::new(cell_cols, cell_rows);
+
+    draw_ring(&mut canvas, cx as i32, cy as i32, radius_dots as i32, pixel_aspect_y_per_x);
+
+    for &(i, j) in &edges {
+        let (x0, y0) = dot_pos[i];
+        let (x1, y1) = dot_pos[j];
+        let touches_focus = i == focus_global || j == focus_global;
+        let r_avg = ((pos[i].0.powi(2) + pos[i].1.powi(2)).sqrt()
+            + (pos[j].0.powi(2) + pos[j].1.powi(2)).sqrt())
+            * 0.5;
+        if !touches_focus && r_avg > 0.7 {
+            draw_line_sparse(&mut canvas, x0, y0, x1, y1, 3);
+        } else if !touches_focus && r_avg > 0.45 {
+            draw_line_sparse(&mut canvas, x0, y0, x1, y1, 2);
+        } else {
+            canvas.line(x0, y0, x1, y1);
+        }
+    }
+
+    for i in 0..n {
+        let (x, y) = dot_pos[i];
+        let r_norm = (pos[i].0.powi(2) + pos[i].1.powi(2)).sqrt();
+        let base_r = if i == focus_global {
+            3
+        } else if degree[i] >= 6 {
+            2
+        } else if degree[i] >= 2 {
+            1
+        } else {
+            0
+        };
+        let shrink = if r_norm > 0.85 { -1 } else if r_norm > 0.6 { 0 } else { 0 };
+        let r = (base_r + shrink).max(0);
         if r == 0 {
             canvas.set(x, y);
         } else {
@@ -264,52 +241,79 @@ pub fn render_constellation(
     }
 
     let mut label_cells: Vec<Vec<Option<(Span<'static>, bool)>>> =
-        (0..gl.cell_rows).map(|_| vec![None; gl.cell_cols]).collect();
+        (0..cell_rows).map(|_| vec![None; cell_cols]).collect();
 
-    let mut indices: Vec<usize> = (0..gl.note_idx.len()).collect();
-    indices.sort_by(|&a, &b| gl.degree[b].cmp(&gl.degree[a]));
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        let ra = (pos[a].0.powi(2) + pos[a].1.powi(2)).sqrt();
+        let rb = (pos[b].0.powi(2) + pos[b].1.powi(2)).sqrt();
+        if a == focus_global {
+            return std::cmp::Ordering::Less;
+        }
+        if b == focus_global {
+            return std::cmp::Ordering::Greater;
+        }
+        ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+            .then(degree[b].cmp(&degree[a]))
+    });
 
-    for i in indices {
-        let (dx, dy) = gl.dot_pos[i];
-        let cell_col = (dx / 2) as i32;
-        let cell_row = (dy / 4) as i32;
-        let note_idx = gl.note_idx[i];
+    for i in order {
+        let (dx, dy) = dot_pos[i];
+        let cell_col = dx / 2;
+        let cell_row = dy / 4;
         let title = vault
             .notes
-            .get(note_idx)
-            .map(|n| n.title.clone())
+            .get(i)
+            .map(|nm| nm.title.clone())
             .unwrap_or_default();
         if title.is_empty() {
             continue;
         }
-        let max_len = (gl.cell_cols / 3).max(8).min(28);
-        let shown = truncate(&title, max_len);
+        let max_len = (cell_cols / 4).max(8).min(24);
+        let r_norm = (pos[i].0.powi(2) + pos[i].1.powi(2)).sqrt();
 
-        let is_selected = selected_note_idx == Some(note_idx);
-        let style = if is_selected {
+        let style = if Some(i) == selected_note_idx || i == focus_global {
             theme::brand().add_modifier(Modifier::BOLD)
-        } else if gl.degree[i] >= 4 {
+        } else if r_norm < 0.4 {
             theme::text()
-        } else {
+        } else if r_norm < 0.75 {
             theme::muted()
+        } else {
+            theme::faint()
         };
 
-        let label_row = (cell_row + 1).max(0).min(gl.cell_rows as i32 - 1) as usize;
-        let label_col_start = (cell_col + 1)
-            .max(0)
-            .min(gl.cell_cols as i32 - shown.chars().count() as i32 - 1) as usize;
+        let shown = if r_norm > 0.8 {
+            truncate(&title, max_len.min(10))
+        } else {
+            truncate(&title, max_len)
+        };
 
-        if !place_label(&mut label_cells, label_row, label_col_start, &shown, style.clone()) {
-            let alt_col = (cell_col - shown.chars().count() as i32 - 1).max(0) as usize;
-            place_label(&mut label_cells, label_row, alt_col, &shown, style);
+        let want_right = pos[i].0 >= -0.05;
+        let label_row = (cell_row + 1).clamp(0, cell_rows as i32 - 1) as usize;
+        let len_chars = shown.chars().count() as i32;
+        let primary_col = if want_right {
+            (cell_col + 2).clamp(0, cell_cols as i32 - len_chars)
+        } else {
+            (cell_col - len_chars - 1).max(0)
+        };
+        if !place_label(&mut label_cells, label_row, primary_col as usize, &shown, style.clone()) {
+            let alt_col = if want_right {
+                (cell_col - len_chars - 1).max(0)
+            } else {
+                (cell_col + 2).clamp(0, cell_cols as i32 - len_chars)
+            };
+            let alt_row = (cell_row - 1).clamp(0, cell_rows as i32 - 1) as usize;
+            if !place_label(&mut label_cells, alt_row, alt_col as usize, &shown, style.clone()) {
+                place_label(&mut label_cells, label_row, alt_col as usize, &shown, style);
+            }
         }
     }
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(gl.cell_rows);
-    for row in 0..gl.cell_rows {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(cell_rows);
+    for row in 0..cell_rows {
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut col = 0usize;
-        while col < gl.cell_cols {
+        while col < cell_cols {
             if let Some((label_span, is_label_head)) = label_cells[row][col].clone() {
                 if is_label_head {
                     spans.push(label_span.clone());
@@ -319,7 +323,7 @@ pub fn render_constellation(
                 }
             }
             let mut chunk = String::new();
-            while col < gl.cell_cols && label_cells[row][col].is_none() {
+            while col < cell_cols && label_cells[row][col].is_none() {
                 chunk.push(canvas.cell(col, row));
                 col += 1;
             }
@@ -331,6 +335,66 @@ pub fn render_constellation(
     }
 
     lines
+}
+
+fn bfs_depth(n: usize, edges: &[(usize, usize)], start: usize) -> Vec<Option<usize>> {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(a, b) in edges {
+        adj[a].push(b);
+        adj[b].push(a);
+    }
+    let mut depth = vec![None; n];
+    let mut q = std::collections::VecDeque::new();
+    depth[start] = Some(0);
+    q.push_back(start);
+    while let Some(u) = q.pop_front() {
+        let d = depth[u].unwrap();
+        for &v in &adj[u] {
+            if depth[v].is_none() {
+                depth[v] = Some(d + 1);
+                q.push_back(v);
+            }
+        }
+    }
+    depth
+}
+
+fn draw_ring(canvas: &mut Canvas, cx: i32, cy: i32, r: i32, aspect: f32) {
+    let steps = 360 / 2;
+    for i in 0..steps {
+        let theta = (i as f32) * std::f32::consts::TAU / steps as f32;
+        let x = cx + (theta.cos() * r as f32).round() as i32;
+        let y = cy + (theta.sin() * r as f32 * aspect).round() as i32;
+        canvas.set(x, y);
+    }
+}
+
+fn draw_line_sparse(canvas: &mut Canvas, x0: i32, y0: i32, x1: i32, y1: i32, stride: i32) {
+    let dx = (x1 - x0).abs();
+    let dy = -((y1 - y0).abs());
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let (mut x, mut y) = (x0, y0);
+    let mut step = 0i32;
+    loop {
+        if step % stride == 0 {
+            canvas.set(x, y);
+        }
+        step += 1;
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
 }
 
 fn place_label(
