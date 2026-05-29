@@ -115,6 +115,8 @@ pub enum SlashKind {
     Heading,
     Code,
     List,
+    Checklist,
+    Table,
     Quote,
     Divider,
 }
@@ -139,6 +141,8 @@ pub fn slash_items() -> Vec<SlashItem> {
         SlashItem { label: "heading", description: "insert # heading prefix", kind: SlashKind::Heading },
         SlashItem { label: "code", description: "insert ``` fenced code block", kind: SlashKind::Code },
         SlashItem { label: "list", description: "insert - bullet", kind: SlashKind::List },
+        SlashItem { label: "checklist", description: "insert - [ ] todo item", kind: SlashKind::Checklist },
+        SlashItem { label: "table", description: "insert a 2x2 table skeleton", kind: SlashKind::Table },
         SlashItem { label: "quote", description: "insert > blockquote", kind: SlashKind::Quote },
         SlashItem { label: "divider", description: "insert --- horizontal rule", kind: SlashKind::Divider },
     ]
@@ -850,6 +854,19 @@ impl App {
             SlashKind::List => {
                 if let Some(o) = self.open.as_mut() {
                     o.textarea.insert_str("- ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Checklist => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("- [ ] ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Table => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea
+                        .insert_str("| col 1 | col 2 |\n| ----- | ----- |\n|       |       |\n");
                     o.dirty = true;
                 }
             }
