@@ -112,7 +112,9 @@ pub struct GraphView {
 pub enum SlashKind {
     Link,
     Today,
-    Heading,
+    H1,
+    H2,
+    H3,
     Code,
     List,
     Checklist,
@@ -138,7 +140,9 @@ pub fn slash_items() -> Vec<SlashItem> {
     vec![
         SlashItem { label: "link", description: "wrap word in [[…]] or insert empty link", kind: SlashKind::Link },
         SlashItem { label: "today", description: "insert [[YYYY-MM-DD]] for today's daily", kind: SlashKind::Today },
-        SlashItem { label: "heading", description: "insert # heading prefix", kind: SlashKind::Heading },
+        SlashItem { label: "h1", description: "insert # heading", kind: SlashKind::H1 },
+        SlashItem { label: "h2", description: "insert ## heading", kind: SlashKind::H2 },
+        SlashItem { label: "h3", description: "insert ### heading", kind: SlashKind::H3 },
         SlashItem { label: "code", description: "insert ``` fenced code block", kind: SlashKind::Code },
         SlashItem { label: "list", description: "insert - bullet", kind: SlashKind::List },
         SlashItem { label: "checklist", description: "insert - [ ] todo item", kind: SlashKind::Checklist },
@@ -863,9 +867,21 @@ impl App {
                     o.dirty = true;
                 }
             }
-            SlashKind::Heading => {
+            SlashKind::H1 => {
                 if let Some(o) = self.open.as_mut() {
                     o.textarea.insert_str("# ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::H2 => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("## ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::H3 => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("### ");
                     o.dirty = true;
                 }
             }
@@ -1447,9 +1463,17 @@ impl App {
                         self.new_note(&query);
                     }
                 } else if let Some(i) = id {
-                    let path = self.vault.notes.get(i).map(|n| n.path.clone());
-                    if let Some(path) = path {
-                        self.open_path(&path);
+                    let notes_len = self.vault.notes.len();
+                    if i >= notes_len {
+                        let slash_idx = i - notes_len;
+                        if let Some(item) = slash_items().get(slash_idx) {
+                            self.execute_slash(item.kind);
+                        }
+                    } else {
+                        let path = self.vault.notes.get(i).map(|n| n.path.clone());
+                        if let Some(path) = path {
+                            self.open_path(&path);
+                        }
                     }
                 }
             }
@@ -1493,6 +1517,11 @@ impl App {
                 items.push(format!("{title}: {snippet}"));
                 map.push(idx);
             }
+        }
+        let notes_len = self.vault.notes.len();
+        for (k, it) in slash_items().iter().enumerate() {
+            items.push(format!("/{}  {}", it.label, it.description));
+            map.push(notes_len + k);
         }
         let mut p = Picker::with_map(items, map);
         if !query.is_empty() {
