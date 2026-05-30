@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -30,6 +30,11 @@ struct Seg {
     link: Option<usize>,
 }
 
+struct LogicalLine {
+    segs: Vec<Seg>,
+    raw: bool,
+}
+
 struct LinkMeta {
     target: String,
     heading: Option<String>,
@@ -37,15 +42,25 @@ struct LinkMeta {
     resolved: bool,
 }
 
+struct TableBuf {
+    aligns: Vec<Alignment>,
+    header: Vec<String>,
+    body: Vec<Vec<String>>,
+    cur_row: Vec<String>,
+    cur_cell: String,
+    in_head: bool,
+}
+
 struct Builder<F: Fn(&str) -> bool> {
     width: usize,
-    logical: Vec<Vec<Seg>>,
+    logical: Vec<LogicalLine>,
     cur: Vec<Seg>,
     style: Vec<Style>,
     list: Vec<Option<u64>>,
     bq: usize,
     code: bool,
     pending: String,
+    table: Option<TableBuf>,
     links: Vec<LinkMeta>,
     resolves: F,
 }
@@ -61,6 +76,7 @@ impl<F: Fn(&str) -> bool> Builder<F> {
             bq: 0,
             code: false,
             pending: String::new(),
+            table: None,
             links: Vec::new(),
             resolves,
         }
@@ -85,17 +101,43 @@ impl<F: Fn(&str) -> bool> Builder<F> {
             });
         }
         line.append(&mut self.cur);
-        self.logical.push(line);
+        self.logical.push(LogicalLine {
+            segs: line,
+            raw: false,
+        });
     }
 
     fn block_gap(&mut self) {
         self.flush();
-        if self.logical.last().is_some_and(|l| !l.is_empty()) {
-            self.logical.push(Vec::new());
+        if self.logical.last().is_some_and(|l| !l.segs.is_empty()) {
+            self.logical.push(LogicalLine {
+                segs: Vec::new(),
+                raw: false,
+            });
         }
     }
 
     fn event(&mut self, ev: Event) {
+        if self.table.is_some() {
+            match &ev {
+                Event::Text(t) | Event::Code(t) => {
+                    let cell = &mut self.table.as_mut().unwrap().cur_cell;
+                    if matches!(ev, Event::Code(_)) {
+                        cell.push('`');
+                        cell.push_str(t);
+                        cell.push('`');
+                    } else {
+                        cell.push_str(t);
+                    }
+                    return;
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    self.table.as_mut().unwrap().cur_cell.push(' ');
+                    return;
+                }
+                _ => {}
+            }
+        }
         if let Event::Text(t) = &ev {
             if self.code {
                 self.push_code_text(t);
@@ -122,11 +164,14 @@ impl<F: Fn(&str) -> bool> Builder<F> {
             Event::HardBreak => self.flush(),
             Event::Rule => {
                 self.flush();
-                self.logical.push(vec![Seg {
-                    text: "─".repeat(self.width),
-                    style: theme::faint(),
-                    link: None,
-                }]);
+                self.logical.push(LogicalLine {
+                    segs: vec![Seg {
+                        text: "─".repeat(self.width),
+                        style: theme::faint(),
+                        link: None,
+                    }],
+                    raw: false,
+                });
             }
             Event::TaskListMarker(done) => self.cur.push(Seg {
                 text: if done { "[x] " } else { "[ ] " }.to_string(),
@@ -163,6 +208,33 @@ impl<F: Fn(&str) -> bool> Builder<F> {
                 self.flush();
                 self.emit_item_prefix();
             }
+            Tag::Table(aligns) => {
+                self.block_gap();
+                self.table = Some(TableBuf {
+                    aligns,
+                    header: Vec::new(),
+                    body: Vec::new(),
+                    cur_row: Vec::new(),
+                    cur_cell: String::new(),
+                    in_head: false,
+                });
+            }
+            Tag::TableHead => {
+                if let Some(t) = self.table.as_mut() {
+                    t.in_head = true;
+                    t.cur_row.clear();
+                }
+            }
+            Tag::TableRow => {
+                if let Some(t) = self.table.as_mut() {
+                    t.cur_row.clear();
+                }
+            }
+            Tag::TableCell => {
+                if let Some(t) = self.table.as_mut() {
+                    t.cur_cell.clear();
+                }
+            }
             Tag::Emphasis => self.style.push(Style::default().add_modifier(Modifier::ITALIC)),
             Tag::Strong => self.style.push(Style::default().add_modifier(Modifier::BOLD)),
             Tag::Strikethrough => self
@@ -177,9 +249,26 @@ impl<F: Fn(&str) -> bool> Builder<F> {
     fn end(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::Paragraph => self.flush(),
-            TagEnd::Heading(_) => {
+            TagEnd::Heading(level) => {
+                let w: usize = self
+                    .cur
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.text.as_str()))
+                    .sum();
                 self.flush();
                 self.style.pop();
+                if w > 0
+                    && let Some((ch, style)) = heading_underline(level)
+                {
+                    self.logical.push(LogicalLine {
+                        segs: vec![Seg {
+                            text: ch.to_string().repeat(w.min(self.width)),
+                            style,
+                            link: None,
+                        }],
+                        raw: false,
+                    });
+                }
             }
             TagEnd::BlockQuote(_) => self.bq = self.bq.saturating_sub(1),
             TagEnd::CodeBlock => {
@@ -190,6 +279,31 @@ impl<F: Fn(&str) -> bool> Builder<F> {
                 self.list.pop();
             }
             TagEnd::Item => self.flush(),
+            TagEnd::TableCell => {
+                if let Some(t) = self.table.as_mut() {
+                    let cell = std::mem::take(&mut t.cur_cell);
+                    t.cur_row.push(cell.trim().to_string());
+                }
+            }
+            TagEnd::TableHead => {
+                if let Some(t) = self.table.as_mut() {
+                    t.header = std::mem::take(&mut t.cur_row);
+                    t.in_head = false;
+                }
+            }
+            TagEnd::TableRow => {
+                if let Some(t) = self.table.as_mut()
+                    && !t.in_head
+                {
+                    let row = std::mem::take(&mut t.cur_row);
+                    t.body.push(row);
+                }
+            }
+            TagEnd::Table => {
+                if let Some(t) = self.table.take() {
+                    self.emit_table(t);
+                }
+            }
             TagEnd::Emphasis
             | TagEnd::Strong
             | TagEnd::Strikethrough
@@ -199,6 +313,58 @@ impl<F: Fn(&str) -> bool> Builder<F> {
             }
             _ => {}
         }
+    }
+
+    fn emit_table(&mut self, t: TableBuf) {
+        let ncols = t
+            .header
+            .len()
+            .max(t.body.iter().map(|r| r.len()).max().unwrap_or(0));
+        if ncols == 0 {
+            return;
+        }
+
+        let mut widths = vec![1usize; ncols];
+        for (i, w) in widths.iter_mut().enumerate() {
+            let mut max = t
+                .header
+                .get(i)
+                .map(|s| UnicodeWidthStr::width(s.as_str()))
+                .unwrap_or(0);
+            for row in &t.body {
+                if let Some(c) = row.get(i) {
+                    max = max.max(UnicodeWidthStr::width(c.as_str()));
+                }
+            }
+            *w = max.max(1);
+        }
+
+        let overhead = 3 * ncols + 1;
+        let avail = self.width.saturating_sub(overhead).max(ncols);
+        let mut total: usize = widths.iter().sum();
+        while total > avail {
+            let idx = widths
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, w)| **w)
+                .map(|(i, _)| i)
+                .unwrap();
+            if widths[idx] <= 1 {
+                break;
+            }
+            widths[idx] -= 1;
+            total -= 1;
+        }
+
+        self.logical.push(table_rule("┌", "┬", "┐", &widths));
+        self.logical
+            .push(table_row(&t.header, &widths, &t.aligns, true));
+        self.logical.push(table_rule("├", "┼", "┤", &widths));
+        for row in &t.body {
+            self.logical
+                .push(table_row(row, &widths, &t.aligns, false));
+        }
+        self.logical.push(table_rule("└", "┴", "┘", &widths));
     }
 
     fn emit_item_prefix(&mut self) {
@@ -291,8 +457,107 @@ impl<F: Fn(&str) -> bool> Builder<F> {
     }
 }
 
-fn heading_style(_level: HeadingLevel) -> Style {
-    Style::default().fg(theme::EMPH).add_modifier(Modifier::BOLD)
+fn heading_style(level: HeadingLevel) -> Style {
+    use HeadingLevel::*;
+    let base = Style::default().add_modifier(Modifier::BOLD);
+    match level {
+        H1 | H2 => base.fg(theme::EMPH),
+        H3 => base.fg(theme::ACCENT),
+        H4 => base.fg(theme::TEXT),
+        H5 => base.fg(theme::MUTED),
+        H6 => base.fg(theme::MUTED).add_modifier(Modifier::ITALIC),
+    }
+}
+
+fn heading_underline(level: HeadingLevel) -> Option<(char, Style)> {
+    match level {
+        HeadingLevel::H1 => Some(('═', Style::default().fg(theme::EMPH))),
+        HeadingLevel::H2 => Some(('─', Style::default().fg(theme::MUTED))),
+        _ => None,
+    }
+}
+
+fn table_rule(left: &str, mid: &str, right: &str, widths: &[usize]) -> LogicalLine {
+    let mut text = String::from(left);
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            text.push_str(mid);
+        }
+        text.push_str(&"─".repeat(w + 2));
+    }
+    text.push_str(right);
+    LogicalLine {
+        segs: vec![Seg {
+            text,
+            style: theme::faint(),
+            link: None,
+        }],
+        raw: true,
+    }
+}
+
+fn table_row(cells: &[String], widths: &[usize], aligns: &[Alignment], header: bool) -> LogicalLine {
+    let border = theme::faint();
+    let cell_style = if header { theme::brand() } else { theme::text() };
+    let mut segs = vec![Seg {
+        text: "│".to_string(),
+        style: border,
+        link: None,
+    }];
+    for (i, w) in widths.iter().enumerate() {
+        let raw = cells.get(i).map(String::as_str).unwrap_or("");
+        let align = aligns.get(i).copied().unwrap_or(Alignment::None);
+        let cell = pad(&truncate_to(raw, *w), *w, align);
+        segs.push(Seg {
+            text: format!(" {cell} "),
+            style: cell_style,
+            link: None,
+        });
+        segs.push(Seg {
+            text: "│".to_string(),
+            style: border,
+            link: None,
+        });
+    }
+    LogicalLine { segs, raw: true }
+}
+
+fn truncate_to(s: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+        if w + cw > max.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+fn pad(s: &str, width: usize, align: Alignment) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        return s.to_string();
+    }
+    let extra = width - w;
+    match align {
+        Alignment::Right => format!("{}{s}", " ".repeat(extra)),
+        Alignment::Center => {
+            let l = extra / 2;
+            let r = extra - l;
+            format!("{}{s}{}", " ".repeat(l), " ".repeat(r))
+        }
+        _ => format!("{s}{}", " ".repeat(extra)),
+    }
 }
 
 struct Unit {
@@ -343,14 +608,24 @@ fn split_words(text: &str, style: Style, out: &mut Vec<Unit>) {
     }
 }
 
-fn wrap(logical: Vec<Vec<Seg>>, links: Vec<LinkMeta>, width: usize) -> RenderedNote {
+fn wrap(logical: Vec<LogicalLine>, links: Vec<LinkMeta>, width: usize) -> RenderedNote {
     let width = width.max(1);
     let mut out_lines: Vec<Line<'static>> = Vec::new();
     let mut link_spans: Vec<LinkSpan> = Vec::new();
 
-    for segs in logical {
+    for line in logical {
+        if line.raw {
+            let spans: Vec<Span<'static>> = line
+                .segs
+                .into_iter()
+                .map(|s| Span::styled(s.text, s.style))
+                .collect();
+            out_lines.push(Line::from(spans));
+            continue;
+        }
+
         let mut units: Vec<Unit> = Vec::new();
-        for seg in segs {
+        for seg in line.segs {
             if seg.link.is_some() {
                 units.push(Unit {
                     text: seg.text,
@@ -406,6 +681,7 @@ pub fn render<F: Fn(&str) -> bool>(src: &str, width: u16, resolves: F) -> Render
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_TABLES);
     let mut builder = Builder::new(width as usize, resolves);
     for ev in Parser::new_ext(src, opts) {
         builder.event(ev);
@@ -416,6 +692,10 @@ pub fn render<F: Fn(&str) -> bool>(src: &str, width: u16, resolves: F) -> Render
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
 
     #[test]
     fn extracts_links_and_respects_width() {
@@ -446,5 +726,73 @@ mod tests {
         assert_eq!(r.links.len(), 1);
         assert!(r.links[0].resolved);
         assert_eq!(r.links[0].target, "My Note");
+    }
+
+    #[test]
+    fn headings_get_level_specific_underlines() {
+        let r = render("# One\n\n## Two\n\n### Three", 80, |_| false);
+        let texts: Vec<String> = r.lines.iter().map(line_text).collect();
+        assert!(texts.iter().any(|t| t == "One"));
+        assert!(
+            texts.iter().any(|t| t.starts_with('═') && t.chars().count() == 3),
+            "H1 should get a ═ underline matching its width"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with('─') && t.chars().count() == 3),
+            "H2 should get a ─ underline matching its width"
+        );
+        assert!(
+            !texts.iter().any(|t| *t == "═".repeat(80) || *t == "─".repeat(80)),
+            "H3 should not be underlined"
+        );
+    }
+
+    #[test]
+    fn heading_styles_differ_by_level() {
+        let h1 = heading_style(HeadingLevel::H1);
+        let h3 = heading_style(HeadingLevel::H3);
+        let h6 = heading_style(HeadingLevel::H6);
+        assert_ne!(h1.fg, h3.fg);
+        assert!(h6.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn renders_a_table_with_box_borders() {
+        let src = "| col 1 | col 2 |\n| ----- | ----- |\n| a | bb |\n";
+        let r = render(src, 80, |_| false);
+        let texts: Vec<String> = r.lines.iter().map(line_text).collect();
+        let joined = texts.join("\n");
+        assert!(joined.contains('┌') && joined.contains('┐'), "top border");
+        assert!(joined.contains('├') && joined.contains('┤'), "header sep");
+        assert!(joined.contains('└') && joined.contains('┘'), "bottom border");
+        assert!(texts.iter().any(|t| t.contains("col 1") && t.contains("col 2")));
+        assert!(texts.iter().any(|t| t.contains('a') && t.contains("bb")));
+    }
+
+    #[test]
+    fn table_rows_are_not_word_wrapped() {
+        let src = "| name | value |\n| ---- | ----- |\n| x | y |\n";
+        let r = render(src, 80, |_| false);
+        let border_rows = r
+            .lines
+            .iter()
+            .map(line_text)
+            .filter(|t| t.starts_with('│'))
+            .count();
+        assert_eq!(border_rows, 2, "header + one body row, each on a single line");
+    }
+
+    #[test]
+    fn wide_table_is_truncated_to_width() {
+        let src = "| aaaaaaaaaa | bbbbbbbbbb |\n| --- | --- |\n| cccccccccc | dddddddddd |\n";
+        let r = render(src, 16, |_| false);
+        for line in &r.lines {
+            let w: usize = line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(w <= 16, "table line width {w} exceeds 16");
+        }
     }
 }
