@@ -4,11 +4,22 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub default_vault: Option<PathBuf>,
     pub leader: Option<String>,
+    pub format_on_save: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_vault: None,
+            leader: None,
+            format_on_save: true,
+        }
+    }
 }
 
 impl Config {

@@ -1,5 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
@@ -63,6 +64,49 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.graph.is_some() {
         draw_graph(f, app, f.area());
     }
+    if app.slash.is_some() {
+        draw_slash(f, app, f.area());
+    }
+}
+
+fn draw_slash(f: &mut Frame, app: &App, area: Rect) {
+    let Some(menu) = &app.slash else {
+        return;
+    };
+    let item_count = menu.items.len().max(1);
+    let panel_h: u16 = (item_count as u16 + 2).min(10);
+    let panel_w: u16 = 44.min(area.width.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(panel_w + 2);
+    let y = area.y + area.height.saturating_sub(panel_h + 2);
+    let rect = Rect { x, y, width: panel_w, height: panel_h };
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_style(theme::brand())
+        .title(format!(" /{} ", menu.filter));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if menu.items.is_empty() {
+        let p = Paragraph::new(Line::from(Span::styled(
+            "no match".to_string(),
+            theme::faint(),
+        )));
+        f.render_widget(p, inner);
+        return;
+    }
+    let rows: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let style = if i == menu.sel { theme::selected() } else { theme::text() };
+            let muted = if i == menu.sel { theme::brand() } else { theme::muted() };
+            Line::from(vec![
+                Span::styled(format!(" /{:<10}", it.label), style),
+                Span::styled(it.description.to_string(), muted),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(rows), inner);
 }
 
 fn ensure_render(app: &mut App, width: u16) {
@@ -187,7 +231,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         theme::border()
     };
-    let (title_str, mode_label) = {
+    let (title_str, mode_label, dirty) = {
         let o = app.open.as_ref().unwrap();
         let t = app
             .vault
@@ -200,11 +244,23 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             EditMode::Insert => "INSERT",
             EditMode::Visual => "VISUAL",
         };
-        (t, label)
+        (t, label, o.dirty)
     };
-    let block = Block::bordered()
-        .border_style(border)
-        .title(format!(" {title_str}  [{mode_label}] "));
+    let border = if dirty { theme::warn() } else { border };
+    let title_line = if dirty {
+        Line::from(vec![
+            Span::styled(" ● ", theme::warn().add_modifier(Modifier::BOLD)),
+            Span::styled(title_str, theme::warn().add_modifier(Modifier::BOLD)),
+            Span::styled("  [", theme::muted()),
+            Span::styled(mode_label, theme::muted()),
+            Span::styled("]  ", theme::muted()),
+            Span::styled("UNSAVED", theme::warn().add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+            Span::raw(" "),
+        ])
+    } else {
+        Line::from(vec![Span::raw(format!(" {title_str}  [{mode_label}] "))])
+    };
+    let block = Block::bordered().border_style(border).title(title_line);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -499,46 +555,23 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     f.render_widget(Clear, area);
-    let block = Block::bordered()
-        .border_style(theme::brand())
-        .title(" graph — most connected (enter:open  esc:close) ");
+    let root_title = app
+        .vault
+        .notes
+        .get(g.root_idx)
+        .map(|n| n.title.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let title = format!(
+        " tree - {root_title}  (↑↓ move  →/l expand  ←/h collapse  enter:open  esc:close) "
+    );
+    let block = Block::bordered().border_style(theme::brand()).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let height = inner.height as usize;
-    let start = g.sel.saturating_sub(height.saturating_sub(1));
-    let items: Vec<ListItem> = g
-        .list
-        .iter()
-        .skip(start)
-        .take(height)
-        .enumerate()
-        .map(|(vis, &ni)| {
-            let abs = start + vis;
-            let title = app
-                .vault
-                .notes
-                .get(ni)
-                .map(|n| n.title.as_str())
-                .unwrap_or("?");
-            let back = app.vault.backlinks(ni).len();
-            let out = app.vault.outbound(ni).len();
-            let style = if abs == g.sel {
-                theme::selected()
-            } else {
-                theme::text()
-            };
-            let mut spans = vec![
-                Span::styled(format!("{title}  "), style),
-                Span::styled(format!("←{back} →{out}  "), theme::muted()),
-            ];
-            if back == 0 && out == 0 {
-                spans.push(Span::styled("orphan", theme::faint()));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-    f.render_widget(List::new(items), inner);
+    let lines = crate::graphview::render_tree(&app.vault, &g.visible, &g.expanded, g.sel, inner);
+    let para = Paragraph::new(lines).style(theme::text());
+    f.render_widget(para, inner);
 }
 
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
@@ -860,7 +893,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(app.graph.is_some());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(terminal.backend().buffer()).contains("most connected"));
+        assert!(buffer_text(terminal.backend().buffer()).contains("tree"));
 
         app.on_key(key(KeyCode::Enter));
         assert!(app.graph.is_none());

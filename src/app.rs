@@ -102,8 +102,142 @@ pub struct SearchState {
 }
 
 pub struct GraphView {
-    pub list: Vec<usize>,
+    pub root_idx: usize,
+    pub expanded: HashSet<Vec<usize>>,
+    pub visible: Vec<TreeRow>,
     pub sel: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum SlashKind {
+    Link,
+    Today,
+    H1,
+    H2,
+    H3,
+    Code,
+    List,
+    Checklist,
+    Table,
+    Quote,
+    Divider,
+}
+
+#[derive(Clone)]
+pub struct SlashItem {
+    pub label: &'static str,
+    pub description: &'static str,
+    pub kind: SlashKind,
+}
+
+pub struct SlashMenu {
+    pub filter: String,
+    pub items: Vec<SlashItem>,
+    pub sel: usize,
+}
+
+pub fn slash_items() -> Vec<SlashItem> {
+    vec![
+        SlashItem { label: "link", description: "wrap word in [[…]] or insert empty link", kind: SlashKind::Link },
+        SlashItem { label: "today", description: "insert [[YYYY-MM-DD]] for today's daily", kind: SlashKind::Today },
+        SlashItem { label: "h1", description: "insert # heading", kind: SlashKind::H1 },
+        SlashItem { label: "h2", description: "insert ## heading", kind: SlashKind::H2 },
+        SlashItem { label: "h3", description: "insert ### heading", kind: SlashKind::H3 },
+        SlashItem { label: "code", description: "insert ``` fenced code block", kind: SlashKind::Code },
+        SlashItem { label: "list", description: "insert - bullet", kind: SlashKind::List },
+        SlashItem { label: "checklist", description: "insert - [ ] todo item", kind: SlashKind::Checklist },
+        SlashItem { label: "table", description: "insert a 2x2 table skeleton", kind: SlashKind::Table },
+        SlashItem { label: "quote", description: "insert > blockquote", kind: SlashKind::Quote },
+        SlashItem { label: "divider", description: "insert --- horizontal rule", kind: SlashKind::Divider },
+    ]
+}
+
+pub fn slash_filter(filter: &str) -> Vec<SlashItem> {
+    let all = slash_items();
+    if filter.is_empty() {
+        return all;
+    }
+    let needle = filter.to_lowercase();
+    all.into_iter()
+        .filter(|it| it.label.to_lowercase().starts_with(&needle))
+        .collect()
+}
+
+#[derive(Clone)]
+pub struct TreeRow {
+    pub note_idx: usize,
+    pub path: Vec<usize>,
+    pub depth: usize,
+    pub has_children: bool,
+    pub is_last_at_levels: Vec<bool>,
+}
+
+pub fn toggle_checkbox_line(line: &str) -> Option<String> {
+    let lead: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let rest = &line[lead.len()..];
+    let (bullet, after) = if let Some(s) = rest.strip_prefix("- ") {
+        ("- ", s)
+    } else if let Some(s) = rest.strip_prefix("* ") {
+        ("* ", s)
+    } else if let Some(s) = rest.strip_prefix("+ ") {
+        ("+ ", s)
+    } else {
+        return None;
+    };
+    let tail = if let Some(after_box) = after.strip_prefix("[ ]") {
+        format!("[x]{after_box}")
+    } else if let Some(after_box) = after
+        .strip_prefix("[x]")
+        .or_else(|| after.strip_prefix("[X]"))
+    {
+        format!("[ ]{after_box}")
+    } else {
+        format!("[ ] {after}")
+    };
+    Some(format!("{lead}{bullet}{tail}"))
+}
+
+fn graph_build_visible(
+    vault: &crate::vault::Vault,
+    root_idx: usize,
+    expanded: &HashSet<Vec<usize>>,
+) -> Vec<TreeRow> {
+    fn rec(
+        vault: &crate::vault::Vault,
+        note_idx: usize,
+        path: Vec<usize>,
+        depth: usize,
+        levels: Vec<bool>,
+        expanded: &HashSet<Vec<usize>>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        let children: Vec<usize> = vault
+            .outbound(note_idx)
+            .into_iter()
+            .filter(|c| !path.contains(c))
+            .collect();
+        let has_children = !children.is_empty();
+        rows.push(TreeRow {
+            note_idx,
+            path: path.clone(),
+            depth,
+            has_children,
+            is_last_at_levels: levels.clone(),
+        });
+        if expanded.contains(&path) {
+            for (k, &child) in children.iter().enumerate() {
+                let is_last = k + 1 == children.len();
+                let mut new_levels = levels.clone();
+                new_levels.push(is_last);
+                let mut new_path = path.clone();
+                new_path.push(child);
+                rec(vault, child, new_path, depth + 1, new_levels, expanded, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    rec(vault, root_idx, vec![root_idx], 0, Vec::new(), expanded, &mut rows);
+    rows
 }
 
 const COMMANDS: &[&str] = &[
@@ -132,6 +266,7 @@ pub struct App {
     pub prompt: Option<Prompt>,
     pub palette: Option<Picker>,
     pub graph: Option<GraphView>,
+    pub slash: Option<SlashMenu>,
     pub show_panel: bool,
     pub show_sidebar: bool,
     pub edit_request: Option<PathBuf>,
@@ -143,6 +278,7 @@ pub struct App {
     pub leader_pending: bool,
     pub pinned: HashSet<PathBuf>,
     pub delete_pending: bool,
+    pub format_on_save: bool,
     suppress: HashMap<PathBuf, Instant>,
 }
 
@@ -192,6 +328,7 @@ impl App {
             prompt: None,
             palette: None,
             graph: None,
+            slash: None,
             show_panel: false,
             show_sidebar: true,
             edit_request: None,
@@ -203,6 +340,7 @@ impl App {
             leader_pending: false,
             pinned,
             delete_pending: false,
+            format_on_save: true,
             suppress: HashMap::new(),
         }
     }
@@ -355,10 +493,6 @@ impl App {
                 self.open_palette();
                 return;
             }
-            KeyCode::Char('g') if ctrl => {
-                self.open_graph();
-                return;
-            }
             KeyCode::Char('b') if ctrl => {
                 self.show_panel = !self.show_panel;
                 return;
@@ -396,7 +530,6 @@ impl App {
             Focus::Sidebar => self.focus = Focus::Reader,
             Focus::Reader => {
                 if self.show_sidebar {
-                    self.save_open();
                     self.focus = Focus::Sidebar;
                 }
             }
@@ -499,7 +632,6 @@ impl App {
         match key.code {
             KeyCode::Char('o') if ctrl => return self.open_switcher(),
             KeyCode::Char('p') if ctrl => return self.open_palette(),
-            KeyCode::Char('g') if ctrl => return self.open_graph(),
             KeyCode::Char('b') if ctrl => {
                 self.show_panel = !self.show_panel;
                 return;
@@ -524,7 +656,6 @@ impl App {
             KeyCode::Enter => return self.follow_link_under_cursor(),
             KeyCode::Tab | KeyCode::Esc => {
                 if self.show_sidebar {
-                    self.save_open();
                     self.focus = Focus::Sidebar;
                 }
                 return;
@@ -595,6 +726,9 @@ impl App {
     }
 
     fn insert_key(&mut self, key: KeyEvent) {
+        if self.slash.is_some() {
+            return self.slash_key(key);
+        }
         if key.code == KeyCode::Esc {
             if let Some(o) = self.open.as_mut() {
                 o.mode = EditMode::Normal;
@@ -605,10 +739,190 @@ impl App {
             self.save_open();
             return;
         }
+        if key.code == KeyCode::Char('/')
+            && key.modifiers.is_empty()
+            && self.cursor_after_break()
+        {
+            self.slash = Some(SlashMenu {
+                filter: String::new(),
+                items: slash_items(),
+                sel: 0,
+            });
+        }
         if let Some(o) = self.open.as_mut()
             && o.textarea.input(key)
         {
             o.dirty = true;
+        }
+    }
+
+    fn cursor_after_break(&self) -> bool {
+        let Some(o) = self.open.as_ref() else { return false };
+        let (row, col) = o.textarea.cursor();
+        if col == 0 {
+            return true;
+        }
+        let lines = o.textarea.lines();
+        let chars: Vec<char> = lines
+            .get(row)
+            .map(|l| l.chars().collect())
+            .unwrap_or_default();
+        match chars.get(col - 1) {
+            Some(c) => c.is_whitespace(),
+            None => true,
+        }
+    }
+
+    fn slash_key(&mut self, key: KeyEvent) {
+        let Some(menu) = self.slash.as_mut() else { return };
+        match key.code {
+            KeyCode::Esc => {
+                self.slash = None;
+                return;
+            }
+            KeyCode::Up => {
+                if menu.sel > 0 {
+                    menu.sel -= 1;
+                }
+                return;
+            }
+            KeyCode::Down => {
+                if menu.sel + 1 < menu.items.len() {
+                    menu.sel += 1;
+                }
+                return;
+            }
+            KeyCode::Tab => {
+                if !menu.items.is_empty() {
+                    menu.sel = (menu.sel + 1) % menu.items.len();
+                }
+                return;
+            }
+            KeyCode::Enter => {
+                let kind = menu.items.get(menu.sel).map(|it| it.kind);
+                let filter_chars = menu.filter.chars().count();
+                self.slash = None;
+                self.delete_slash_text(filter_chars);
+                if let Some(k) = kind {
+                    self.execute_slash(k);
+                }
+                return;
+            }
+            KeyCode::Backspace => {
+                if menu.filter.is_empty() {
+                    self.slash = None;
+                    if let Some(o) = self.open.as_mut() {
+                        o.textarea.delete_char();
+                        o.dirty = true;
+                    }
+                    return;
+                }
+                menu.filter.pop();
+                menu.items = slash_filter(&menu.filter);
+                if menu.items.is_empty() {
+                    menu.sel = 0;
+                } else if menu.sel >= menu.items.len() {
+                    menu.sel = menu.items.len() - 1;
+                }
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.delete_char();
+                    o.dirty = true;
+                }
+                return;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                menu.filter.push(c);
+                menu.items = slash_filter(&menu.filter);
+                if menu.items.is_empty() {
+                    menu.sel = 0;
+                } else if menu.sel >= menu.items.len() {
+                    menu.sel = menu.items.len() - 1;
+                }
+                if let Some(o) = self.open.as_mut()
+                    && o.textarea.input(key)
+                {
+                    o.dirty = true;
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    fn delete_slash_text(&mut self, filter_chars: usize) {
+        let Some(o) = self.open.as_mut() else { return };
+        for _ in 0..(filter_chars + 1) {
+            o.textarea.delete_char();
+        }
+        o.dirty = true;
+    }
+
+    fn execute_slash(&mut self, kind: SlashKind) {
+        match kind {
+            SlashKind::Link => self.make_link(),
+            SlashKind::Today => {
+                let stamp = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str(format!("[[{stamp}]]"));
+                    o.dirty = true;
+                }
+            }
+            SlashKind::H1 => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("# ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::H2 => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("## ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::H3 => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("### ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Code => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("```\n\n```");
+                    o.textarea.move_cursor(CursorMove::Up);
+                    o.dirty = true;
+                }
+            }
+            SlashKind::List => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("- ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Checklist => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("- [ ] ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Table => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea
+                        .insert_str("| col 1 | col 2 |\n| ----- | ----- |\n|       |       |\n");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Quote => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("> ");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Divider => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("\n---\n");
+                    o.dirty = true;
+                }
+            }
         }
     }
 
@@ -1149,9 +1463,17 @@ impl App {
                         self.new_note(&query);
                     }
                 } else if let Some(i) = id {
-                    let path = self.vault.notes.get(i).map(|n| n.path.clone());
-                    if let Some(path) = path {
-                        self.open_path(&path);
+                    let notes_len = self.vault.notes.len();
+                    if i >= notes_len {
+                        let slash_idx = i - notes_len;
+                        if let Some(item) = slash_items().get(slash_idx) {
+                            self.execute_slash(item.kind);
+                        }
+                    } else {
+                        let path = self.vault.notes.get(i).map(|n| n.path.clone());
+                        if let Some(path) = path {
+                            self.open_path(&path);
+                        }
                     }
                 }
             }
@@ -1195,6 +1517,11 @@ impl App {
                 items.push(format!("{title}: {snippet}"));
                 map.push(idx);
             }
+        }
+        let notes_len = self.vault.notes.len();
+        for (k, it) in slash_items().iter().enumerate() {
+            items.push(format!("/{}  {}", it.label, it.description));
+            map.push(notes_len + k);
         }
         let mut p = Picker::with_map(items, map);
         if !query.is_empty() {
@@ -1387,36 +1714,77 @@ impl App {
     }
 
     fn open_graph(&mut self) {
+        let root_idx = self
+            .open
+            .as_ref()
+            .map(|o| o.idx)
+            .or_else(|| self.vault.most_connected().first().copied())
+            .unwrap_or(0);
+        if self.vault.notes.is_empty() {
+            return;
+        }
+        let mut expanded: HashSet<Vec<usize>> = HashSet::new();
+        expanded.insert(vec![root_idx]);
+        let visible = graph_build_visible(&self.vault, root_idx, &expanded);
         self.graph = Some(GraphView {
-            list: self.vault.most_connected(),
+            root_idx,
+            expanded,
+            visible,
             sel: 0,
         });
     }
 
     fn graph_key(&mut self, key: KeyEvent) {
-        let len = self.graph.as_ref().map(|g| g.list.len()).unwrap_or(0);
+        let Some(g) = self.graph.as_mut() else { return };
         match key.code {
             KeyCode::Esc => self.graph = None,
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(g) = self.graph.as_mut()
-                    && len > 0
-                {
-                    g.sel = (g.sel + 1).min(len - 1);
+            KeyCode::Up | KeyCode::Char('k') => {
+                if g.sel > 0 {
+                    g.sel -= 1;
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(g) = self.graph.as_mut() {
-                    g.sel = g.sel.saturating_sub(1);
+            KeyCode::Down | KeyCode::Char('j') => {
+                if g.sel + 1 < g.visible.len() {
+                    g.sel += 1;
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let row = g.visible.get(g.sel).cloned();
+                if let Some(row) = row {
+                    if row.has_children && !g.expanded.contains(&row.path) {
+                        g.expanded.insert(row.path);
+                        g.visible = graph_build_visible(&self.vault, g.root_idx, &g.expanded);
+                    } else if g.sel + 1 < g.visible.len() {
+                        g.sel += 1;
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                let row = g.visible.get(g.sel).cloned();
+                if let Some(row) = row {
+                    if g.expanded.contains(&row.path) {
+                        g.expanded.remove(&row.path);
+                        g.visible = graph_build_visible(&self.vault, g.root_idx, &g.expanded);
+                    } else if row.depth > 0 {
+                        let parent_path = row.path[..row.path.len() - 1].to_vec();
+                        if let Some(idx) = g
+                            .visible
+                            .iter()
+                            .position(|r| r.path == parent_path)
+                        {
+                            g.sel = idx;
+                        }
+                    }
                 }
             }
             KeyCode::Enter => {
-                let idx = self.graph.as_ref().and_then(|g| g.list.get(g.sel).copied());
+                let target = g.visible.get(g.sel).map(|r| r.note_idx);
                 self.graph = None;
-                let path = idx
-                    .and_then(|i| self.vault.notes.get(i))
-                    .map(|n| n.path.clone());
-                if let Some(path) = path {
-                    self.open_path(&path);
+                if let Some(i) = target {
+                    if let Some(note) = self.vault.notes.get(i) {
+                        let path = note.path.clone();
+                        self.open_path(&path);
+                    }
                 }
             }
             _ => {}
@@ -1617,10 +1985,33 @@ impl App {
         if !text.ends_with('\n') {
             text.push('\n');
         }
+        if self.format_on_save {
+            text = crate::format::format_markdown(&text);
+        }
         self.suppress(&path);
-        let _ = std::fs::write(&path, text);
+        let _ = std::fs::write(&path, &text);
         self.vault.reload(&path);
         if let Some(o) = self.open.as_mut() {
+            if self.format_on_save {
+                let (cr, cc) = o.textarea.cursor();
+                let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+                let lines = if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+                    lines[..lines.len() - 1].to_vec()
+                } else {
+                    lines
+                };
+                let mut ta = tui_textarea::TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+                ta.set_cursor_line_style(ratatui::style::Style::default());
+                ta.set_selection_style(
+                    ratatui::style::Style::default()
+                        .bg(ratatui::style::Color::Indexed(238))
+                        .fg(ratatui::style::Color::Indexed(255)),
+                );
+                let new_row = cr.min(ta.lines().len().saturating_sub(1));
+                let new_col = cc.min(ta.lines().get(new_row).map(|l| l.chars().count()).unwrap_or(0));
+                ta.move_cursor(tui_textarea::CursorMove::Jump(new_row as u16, new_col as u16));
+                o.textarea = ta;
+            }
             o.dirty = false;
         }
     }
@@ -1718,8 +2109,29 @@ impl App {
                 self.open_link_or_create_search();
                 true
             }
+            KeyCode::Char('g') => {
+                self.open_graph();
+                true
+            }
+            KeyCode::Char('x') => {
+                self.toggle_checkbox();
+                true
+            }
             _ => false,
         }
+    }
+
+    fn toggle_checkbox(&mut self) {
+        let Some(o) = self.open.as_mut() else { return };
+        let (row, col) = o.textarea.cursor();
+        let line = o.textarea.lines().get(row).cloned().unwrap_or_default();
+        let Some(new_line) = toggle_checkbox_line(&line) else { return };
+        o.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
+        o.textarea.delete_line_by_end();
+        o.textarea.insert_str(new_line.clone());
+        let new_col = col.min(new_line.chars().count());
+        o.textarea.move_cursor(CursorMove::Jump(row as u16, new_col as u16));
+        o.dirty = true;
     }
 
     fn is_leader_context(&self) -> bool {

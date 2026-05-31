@@ -7,5 +7,6 @@ tags: [daily]
 - [x] Scaffolded tesoro
 - [x] Reading view works
 - [ ] Wire up navigation
+- [x] [[test this ]]
 
 Back to [[Welcome]].

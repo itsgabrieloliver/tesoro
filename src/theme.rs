@@ -8,6 +8,7 @@ pub const ACCENT: Color = Color::Indexed(110);
 pub const GREEN: Color = Color::Indexed(108);
 pub const CODE: Color = Color::Indexed(180);
 pub const SEL_BG: Color = Color::Indexed(238);
+pub const WARN: Color = Color::Indexed(208);
 
 pub fn text() -> Style {
     Style::default().fg(TEXT)
@@ -23,6 +24,10 @@ pub fn faint() -> Style {
 
 pub fn brand() -> Style {
     Style::default().fg(EMPH).add_modifier(Modifier::BOLD)
+}
+
+pub fn warn() -> Style {
+    Style::default().fg(WARN).add_modifier(Modifier::BOLD)
 }
 
 pub fn border() -> Style {
