@@ -32,6 +32,9 @@ fn main() -> Result<()> {
     let leader = app::parse_leader(config.leader.as_deref().unwrap_or("ctrl"));
     app.set_leader(leader);
     app.format_on_save = config.format_on_save;
+    if let Some(cmd) = config.save_command.as_deref() {
+        app.set_save_command(cmd);
+    }
     app.open_welcome_in_preview();
     tui::run(app)
 }

@@ -10,6 +10,7 @@ pub struct Config {
     pub default_vault: Option<PathBuf>,
     pub leader: Option<String>,
     pub format_on_save: bool,
+    pub save_command: Option<String>,
 }
 
 impl Default for Config {
@@ -18,6 +19,7 @@ impl Default for Config {
             default_vault: None,
             leader: None,
             format_on_save: true,
+            save_command: None,
         }
     }
 }

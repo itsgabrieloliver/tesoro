@@ -40,8 +40,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_sidebar(f, app, a);
     }
 
-    ensure_render(app, center.width.saturating_sub(2));
-    draw_center(f, app, center);
+    let (bar_area, content) = if app.open_buffers().is_empty() {
+        (None, center)
+    } else {
+        let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(center);
+        (Some(rows[0]), rows[1])
+    };
+    if let Some(a) = bar_area {
+        draw_buffer_bar(f, app, a);
+    }
+
+    ensure_render(app, content.width.saturating_sub(2));
+    draw_center(f, app, content);
 
     if let Some(a) = panel_area {
         draw_panel(f, app, a);
@@ -122,19 +132,55 @@ fn ensure_render(app: &mut App, width: u16) {
     }
 }
 
+fn draw_buffer_bar(f: &mut Frame, app: &App, area: Rect) {
+    let tabs = app.open_buffers();
+    let mut spans: Vec<Span> = Vec::new();
+    for t in &tabs {
+        let title = app
+            .vault
+            .notes
+            .get(t.idx)
+            .map(|n| n.title.clone())
+            .unwrap_or_default();
+        let label = if t.dirty {
+            format!(" ●{title} ")
+        } else {
+            format!(" {title} ")
+        };
+        let style = if t.active {
+            theme::selected()
+        } else if t.dirty {
+            theme::warn()
+        } else {
+            theme::muted()
+        };
+        spans.push(Span::styled(label, style));
+        spans.push(Span::raw(" "));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(theme::statusbar()),
+        area,
+    );
+}
+
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let order = app.display_order();
     let items: Vec<ListItem> = order
         .iter()
-        .filter_map(|&i| app.vault.notes.get(i))
-        .map(|n| {
+        .filter_map(|&i| app.vault.notes.get(i).map(|n| (i, n)))
+        .map(|(i, n)| {
             let pinned = app.pinned.contains(&n.path);
-            let line = if pinned {
-                Line::from(Span::styled(format!("* {}", n.title), theme::brand()))
+            let dirty = app.is_note_dirty(i);
+            let mut spans: Vec<Span> = Vec::new();
+            if dirty {
+                spans.push(Span::styled("● ", theme::warn()));
+            }
+            if pinned {
+                spans.push(Span::styled(format!("* {}", n.title), theme::brand()));
             } else {
-                Line::from(Span::styled(n.title.clone(), theme::text()))
-            };
-            ListItem::new(line)
+                spans.push(Span::styled(n.title.clone(), theme::text()));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let border = if app.focus == Focus::Sidebar {
@@ -460,7 +506,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {mode} "), theme::muted()),
         Span::styled(format!(" leader:{leader_label} "), theme::muted()),
         Span::styled(
-            " up/down:links  enter:follow  ^l:make-link  ^p:cmds  tab:notes ",
+            " enter:follow  :w save  ldr+[/]:back/fwd  ldr+`:back  ^l:make-link  ^p:cmds ",
             theme::faint(),
         ),
     ];
@@ -880,6 +926,28 @@ mod tests {
         }
         app.on_key(key(KeyCode::Enter));
         assert!(app.edit_request.is_some());
+    }
+
+    #[test]
+    fn buffer_bar_and_sidebar_show_open_and_dirty_buffers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "# A\n").unwrap();
+        std::fs::write(dir.path().join("B.md"), "# B\n").unwrap();
+        let mut app = load(dir.path());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        app.open_path(&dir.path().join("A.md"));
+        app.on_key(key(KeyCode::Char('A')));
+        for c in "edit".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Esc));
+        app.open_path(&dir.path().join("B.md"));
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains('●'), "a dirty marker should be visible");
+        assert!(text.contains('A') && text.contains('B'), "both buffers listed");
     }
 
     #[test]
