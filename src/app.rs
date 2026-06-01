@@ -74,6 +74,7 @@ pub enum PromptKind {
     NewNote,
     AliasLink { row: usize, start: usize, end: usize },
     Rename { old_path: PathBuf },
+    Command,
 }
 
 pub struct Prompt {
@@ -93,6 +94,12 @@ pub struct OpenNote {
     pub editor_top: u16,
     pub link_sel: usize,
     pub render: Option<Rc<RenderedNote>>,
+}
+
+pub struct BufferTab {
+    pub idx: usize,
+    pub active: bool,
+    pub dirty: bool,
 }
 
 pub struct SearchState {
@@ -245,6 +252,8 @@ const COMMANDS: &[&str] = &[
     "search",
     "tags",
     "graph",
+    "go back",
+    "go forward",
     "new note",
     "daily note",
     "alias link",
@@ -279,7 +288,11 @@ pub struct App {
     pub pinned: HashSet<PathBuf>,
     pub delete_pending: bool,
     pub format_on_save: bool,
+    save_command: String,
     suppress: HashMap<PathBuf, Instant>,
+    buffers: HashMap<PathBuf, OpenNote>,
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
 }
 
 fn load_pins(root: &Path) -> HashSet<PathBuf> {
@@ -341,7 +354,11 @@ impl App {
             pinned,
             delete_pending: false,
             format_on_save: true,
+            save_command: "w".to_string(),
             suppress: HashMap::new(),
+            buffers: HashMap::new(),
+            back: Vec::new(),
+            forward: Vec::new(),
         }
     }
 
@@ -397,6 +414,79 @@ impl App {
     pub fn set_leader(&mut self, leader: LeaderKind) {
         self.leader_kind = leader;
         self.leader_pending = false;
+    }
+
+    pub fn set_save_command(&mut self, cmd: &str) {
+        let c = cmd.trim().trim_start_matches(':').trim();
+        if !c.is_empty() {
+            self.save_command = c.to_string();
+        }
+    }
+
+    fn open_command_prompt(&mut self) {
+        self.prompt = Some(Prompt {
+            title: "command".to_string(),
+            input: String::new(),
+            kind: PromptKind::Command,
+        });
+    }
+
+    fn run_ex_command(&mut self, raw: &str) {
+        let cmd = raw.trim().trim_start_matches(':').trim();
+        if cmd.is_empty() {
+            return;
+        }
+        if cmd == self.save_command || cmd == "w" {
+            self.save_open();
+            return;
+        }
+        match cmd {
+            "wq" | "x" => self.close_buffer(true),
+            "q" => {
+                if self.open.as_ref().is_some_and(|o| o.dirty) {
+                    self.status = Some("unsaved changes (use :wq or :q!)".to_string());
+                } else {
+                    self.close_buffer(false);
+                }
+            }
+            "q!" => self.close_buffer(false),
+            "qa" | "wqa" | "xa" => self.quit(),
+            "qa!" => self.should_quit = true,
+            other => self.status = Some(format!("unknown command: :{other}")),
+        }
+    }
+
+    fn close_buffer(&mut self, save: bool) {
+        let Some(o) = self.open.as_ref() else {
+            return;
+        };
+        let idx = o.idx;
+        if save && o.dirty {
+            self.save_open();
+        }
+        let path = self.vault.notes.get(idx).map(|n| n.path.clone());
+        self.open = None;
+        if let Some(p) = &path {
+            self.buffers.remove(p);
+            self.back.retain(|x| x != p);
+            self.forward.retain(|x| x != p);
+        }
+        let next = self
+            .buffers
+            .keys()
+            .filter_map(|p| self.vault.index_of(p).map(|i| (i, p.clone())))
+            .min_by_key(|(i, _)| *i)
+            .map(|(_, p)| p);
+        if let Some(next) = next {
+            self.navigate_to(&next, false);
+        } else {
+            self.focus = if self.show_sidebar {
+                Focus::Sidebar
+            } else {
+                Focus::Reader
+            };
+            self.status = Some("buffer closed".to_string());
+        }
     }
 
     pub fn open_welcome_in_preview(&mut self) {
@@ -641,6 +731,7 @@ impl App {
                 return;
             }
             KeyCode::Char('s') if ctrl => return self.save_open(),
+            KeyCode::Char(':') => return self.open_command_prompt(),
             KeyCode::Char('e') if ctrl => return self.set_view(ViewMode::Preview),
             KeyCode::Char('l') if ctrl => return self.make_link(),
             KeyCode::Char('l') if alt => return self.open_alias_prompt(),
@@ -1206,6 +1297,7 @@ impl App {
             }
             KeyCode::Char('n') | KeyCode::Down => return self.cycle_link(1),
             KeyCode::Char('N') | KeyCode::Up => return self.cycle_link(-1),
+            KeyCode::Char(':') => return self.open_command_prompt(),
             KeyCode::Enter => return self.follow_selected_link(),
             _ => {}
         }
@@ -1621,6 +1713,7 @@ impl App {
                         self.wrap_aliased_link(&p.input, row, start, end)
                     }
                     PromptKind::Rename { old_path } => self.rename_to(&old_path, &p.input),
+                    PromptKind::Command => self.run_ex_command(&p.input),
                 }
             }
             KeyCode::Backspace => {
@@ -1695,6 +1788,8 @@ impl App {
             "search" => self.open_search(),
             "tags" => self.open_tags(),
             "graph" => self.open_graph(),
+            "go back" => self.go_back(),
+            "go forward" => self.go_forward(),
             "new note" => {
                 self.prompt = Some(Prompt {
                     title: "new note".to_string(),
@@ -1828,12 +1923,38 @@ impl App {
         self.open_path(&path);
     }
 
-    fn open_path(&mut self, path: &Path) {
-        self.save_open();
-        let Some(idx) = self.vault.index_of(path) else {
+    pub(crate) fn open_path(&mut self, path: &Path) {
+        self.navigate_to(path, true);
+    }
+
+    fn navigate_to(&mut self, path: &Path, record: bool) {
+        let path = path.to_path_buf();
+        let Some(idx) = self.vault.index_of(&path) else {
             return;
         };
-        let Ok(src) = std::fs::read_to_string(path) else {
+        if let Some(cur) = self.current_path() {
+            if cur != path {
+                if record {
+                    self.back.push(cur.clone());
+                    self.forward.clear();
+                }
+                if let Some(o) = self.open.take() {
+                    self.buffers.insert(cur, o);
+                }
+            } else {
+                self.open = None;
+            }
+        }
+        self.selected = idx;
+        self.pending = Pending::None;
+        self.focus = Focus::Reader;
+        if let Some(mut buf) = self.buffers.remove(&path) {
+            buf.idx = idx;
+            self.open = Some(buf);
+            return;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            self.open = None;
             return;
         };
         let mut lines: Vec<String> = src.lines().map(|s| s.to_string()).collect();
@@ -1847,7 +1968,6 @@ impl App {
                 .bg(ratatui::style::Color::Indexed(238))
                 .fg(ratatui::style::Color::Indexed(255)),
         );
-        self.selected = idx;
         self.open = Some(OpenNote {
             idx,
             textarea,
@@ -1860,8 +1980,98 @@ impl App {
             link_sel: 0,
             render: None,
         });
-        self.focus = Focus::Reader;
-        self.pending = Pending::None;
+    }
+
+    fn current_path(&self) -> Option<PathBuf> {
+        self.open
+            .as_ref()
+            .and_then(|o| self.vault.notes.get(o.idx))
+            .map(|n| n.path.clone())
+    }
+
+    pub fn open_buffers(&self) -> Vec<BufferTab> {
+        let active = self.open.as_ref().map(|o| o.idx);
+        let mut tabs: Vec<BufferTab> = Vec::new();
+        if let Some(o) = self.open.as_ref() {
+            tabs.push(BufferTab {
+                idx: o.idx,
+                active: true,
+                dirty: o.dirty,
+            });
+        }
+        for (path, buf) in &self.buffers {
+            if let Some(i) = self.vault.index_of(path)
+                && Some(i) != active
+            {
+                tabs.push(BufferTab {
+                    idx: i,
+                    active: false,
+                    dirty: buf.dirty,
+                });
+            }
+        }
+        tabs.sort_by_key(|t| t.idx);
+        tabs
+    }
+
+    pub fn is_note_dirty(&self, idx: usize) -> bool {
+        if let Some(o) = self.open.as_ref()
+            && o.idx == idx
+        {
+            return o.dirty;
+        }
+        self.vault
+            .notes
+            .get(idx)
+            .and_then(|n| self.buffers.get(&n.path))
+            .map(|b| b.dirty)
+            .unwrap_or(false)
+    }
+
+    fn go_back(&mut self) {
+        while let Some(prev) = self.back.pop() {
+            if self.vault.index_of(&prev).is_some() {
+                if let Some(cur) = self.current_path() {
+                    self.forward.push(cur);
+                }
+                self.navigate_to(&prev, false);
+                return;
+            }
+        }
+        self.status = Some("no previous note".to_string());
+    }
+
+    fn go_forward(&mut self) {
+        while let Some(next) = self.forward.pop() {
+            if self.vault.index_of(&next).is_some() {
+                if let Some(cur) = self.current_path() {
+                    self.back.push(cur);
+                }
+                self.navigate_to(&next, false);
+                return;
+            }
+        }
+        self.status = Some("no next note".to_string());
+    }
+
+    fn save_buffer(&mut self, buf: &OpenNote) {
+        if !buf.dirty {
+            return;
+        }
+        let Some(note) = self.vault.notes.get(buf.idx) else {
+            return;
+        };
+        let path = note.path.clone();
+        let mut text = buf.textarea.lines().join("\n");
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        if self.format_on_save {
+            text = crate::format::format_markdown(&text);
+        }
+        self.suppress(&path);
+        let _ = std::fs::write(&path, &text);
+        self.vault.reload(&path);
     }
 
     fn open_link_target(&mut self, target: &str) {
@@ -2027,6 +2237,10 @@ impl App {
 
     fn quit(&mut self) {
         self.save_open();
+        let bufs: Vec<OpenNote> = std::mem::take(&mut self.buffers).into_values().collect();
+        for buf in &bufs {
+            self.save_buffer(buf);
+        }
         self.should_quit = true;
     }
 
@@ -2117,6 +2331,18 @@ impl App {
                 self.toggle_checkbox();
                 true
             }
+            KeyCode::Char('[') => {
+                self.go_back();
+                true
+            }
+            KeyCode::Char(']') => {
+                self.go_forward();
+                true
+            }
+            KeyCode::Char('`') => {
+                self.go_back();
+                true
+            }
             _ => false,
         }
     }
@@ -2189,6 +2415,9 @@ impl App {
         if self.pinned.remove(&path) {
             save_pins(&self.vault.root, &self.pinned);
         }
+        self.buffers.remove(&path);
+        self.back.retain(|p| p != &path);
+        self.forward.retain(|p| p != &path);
         if was_open {
             self.open = None;
         }
@@ -2244,9 +2473,12 @@ impl App {
             self.pinned.insert(new_path.clone());
             save_pins(&self.vault.root, &self.pinned);
         }
+        self.buffers.remove(old_path);
+        self.back.retain(|p| p != old_path);
+        self.forward.retain(|p| p != old_path);
         self.status = Some(format!("renamed to {new_name}"));
         if was_open {
-            self.open_path(&new_path);
+            self.navigate_to(&new_path, false);
         } else if let Some(idx) = self.vault.index_of(&new_path) {
             self.selected = idx;
         }
@@ -2659,5 +2891,184 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         let line = app.open.as_ref().unwrap().textarea.lines()[0].clone();
         assert!(line.contains("[[Personal Info|personal]]"));
+    }
+
+    fn app_with_two_notes() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "# A\n").unwrap();
+        std::fs::write(dir.path().join("B.md"), "# B\n").unwrap();
+        let vault = Vault::load(dir.path().to_path_buf()).unwrap();
+        (dir, App::new(vault))
+    }
+
+    fn open_title(app: &App) -> String {
+        let o = app.open.as_ref().unwrap();
+        app.vault.notes[o.idx].title.clone()
+    }
+
+    #[test]
+    fn go_back_and_forward_walk_history() {
+        let (dir, mut app) = app_with_two_notes();
+        app.open_path(&dir.path().join("A.md"));
+        app.open_path(&dir.path().join("B.md"));
+        assert_eq!(open_title(&app), "B");
+        app.go_back();
+        assert_eq!(open_title(&app), "A");
+        app.go_forward();
+        assert_eq!(open_title(&app), "B");
+    }
+
+    #[test]
+    fn go_back_with_empty_history_is_noop() {
+        let (dir, mut app) = app_with_two_notes();
+        app.open_path(&dir.path().join("A.md"));
+        app.go_back();
+        assert_eq!(open_title(&app), "A");
+        assert_eq!(app.status.as_deref(), Some("no previous note"));
+    }
+
+    #[test]
+    fn leader_brackets_walk_history() {
+        let (dir, mut app) = app_with_two_notes();
+        app.set_leader(LeaderKind::Char(' '));
+        app.open_path(&dir.path().join("A.md"));
+        app.open_path(&dir.path().join("B.md"));
+        assert_eq!(open_title(&app), "B");
+
+        app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Char('[')));
+        assert_eq!(open_title(&app), "A");
+
+        app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Char(']')));
+        assert_eq!(open_title(&app), "B");
+    }
+
+    #[test]
+    fn leader_backtick_goes_back() {
+        let (dir, mut app) = app_with_two_notes();
+        app.set_leader(LeaderKind::Char(' '));
+        app.open_path(&dir.path().join("A.md"));
+        app.open_path(&dir.path().join("B.md"));
+        app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Char('`')));
+        assert_eq!(open_title(&app), "A");
+    }
+
+    #[test]
+    fn colon_w_saves_via_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.md");
+        std::fs::write(&a, "# A\n").unwrap();
+        let vault = Vault::load(dir.path().to_path_buf()).unwrap();
+        let mut app = App::new(vault);
+        app.open_path(&a);
+        app.on_key(key(KeyCode::Char('A')));
+        for c in " tail".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char(':')));
+        assert!(app.prompt.is_some());
+        app.on_key(key(KeyCode::Char('w')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.prompt.is_none());
+        assert!(std::fs::read_to_string(&a).unwrap().contains("tail"));
+    }
+
+    #[test]
+    fn wq_saves_and_closes_buffer_without_quitting() {
+        let (dir, mut app) = app_with_two_notes();
+        let b = dir.path().join("B.md");
+        app.open_path(&dir.path().join("A.md"));
+        app.open_path(&b);
+        app.on_key(key(KeyCode::Char('A')));
+        for c in " edit".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Esc));
+        app.run_ex_command("wq");
+        assert!(!app.should_quit, "program must stay open");
+        assert!(std::fs::read_to_string(&b).unwrap().contains("edit"));
+        assert_eq!(open_title(&app), "A", "closing B switches to the other buffer");
+        assert!(!app.open_buffers().iter().any(|t| app.vault.notes[t.idx].title == "B"));
+    }
+
+    #[test]
+    fn closing_last_buffer_goes_home() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "# A\n").unwrap();
+        let vault = Vault::load(dir.path().to_path_buf()).unwrap();
+        let mut app = App::new(vault);
+        app.open_path(&dir.path().join("A.md"));
+        app.run_ex_command("q");
+        assert!(!app.should_quit);
+        assert!(app.open.is_none(), "no buffer open after closing the last one");
+    }
+
+    #[test]
+    fn q_refuses_to_close_dirty_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.md");
+        std::fs::write(&a, "# A\n").unwrap();
+        let vault = Vault::load(dir.path().to_path_buf()).unwrap();
+        let mut app = App::new(vault);
+        app.open_path(&a);
+        app.on_key(key(KeyCode::Char('A')));
+        app.on_key(key(KeyCode::Char('z')));
+        app.on_key(key(KeyCode::Esc));
+        app.run_ex_command("q");
+        assert!(app.open.is_some(), ":q must not close a dirty buffer");
+        app.run_ex_command("q!");
+        assert!(app.open.is_none(), ":q! force-closes");
+    }
+
+    #[test]
+    fn custom_save_command_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.md");
+        std::fs::write(&a, "# A\n").unwrap();
+        let vault = Vault::load(dir.path().to_path_buf()).unwrap();
+        let mut app = App::new(vault);
+        app.set_save_command(":save");
+        app.open_path(&a);
+        app.on_key(key(KeyCode::Char('A')));
+        for c in " z".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Esc));
+        app.run_ex_command("save");
+        assert!(std::fs::read_to_string(&a).unwrap().contains(" z"));
+    }
+
+    #[test]
+    fn switching_preserves_unsaved_buffer_without_writing_disk() {
+        let (dir, mut app) = app_with_two_notes();
+        let a = dir.path().join("A.md");
+        app.open_path(&a);
+        if let Some(o) = app.open.as_mut() {
+            o.textarea.insert_str("draft ");
+            o.dirty = true;
+        }
+        app.open_path(&dir.path().join("B.md"));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "# A\n");
+        app.open_path(&a);
+        let o = app.open.as_ref().unwrap();
+        assert!(o.dirty, "returning should keep the buffer dirty");
+        assert!(o.textarea.lines().join("\n").contains("draft"));
+    }
+
+    #[test]
+    fn quit_flushes_dirty_background_buffers() {
+        let (dir, mut app) = app_with_two_notes();
+        let a = dir.path().join("A.md");
+        app.open_path(&a);
+        if let Some(o) = app.open.as_mut() {
+            o.textarea.insert_str("kept ");
+            o.dirty = true;
+        }
+        app.open_path(&dir.path().join("B.md"));
+        app.quit();
+        assert!(std::fs::read_to_string(&a).unwrap().contains("kept"));
     }
 }
