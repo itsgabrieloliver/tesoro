@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use crossterm::event::KeyModifiers;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, EditMode, Focus, LeaderKind, SwitcherMode, ViewMode};
 use crate::picker::Picker;
@@ -316,7 +317,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let (cr, cc) = o.textarea.cursor();
     let selection = o.textarea.selection_range();
     let mode = o.mode;
-    let conceal = mode == EditMode::Normal && selection.is_none();
+    let conceal = selection.is_none() && matches!(mode, EditMode::Normal | EditMode::Insert);
 
     let cr_u16 = cr as u16;
     if cr_u16 < o.editor_top {
@@ -340,6 +341,15 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
         let links = crate::markdown::wikilink_positions(line);
         let cursor_on_this_line = line_idx == cr;
 
+        if conceal && !cursor_on_this_line {
+            let mut x = inner.x;
+            for (txt, st) in crate::markdown::conceal_line(line) {
+                buf.set_string(x, y, &txt, st);
+                x += UnicodeWidthStr::width(txt.as_str()) as u16;
+            }
+            continue;
+        }
+
         let mut visual_col: u16 = 0;
         let mut last_end: usize = 0;
 
@@ -359,25 +369,17 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             }
             let raw: String = chars[*bs..*be].iter().collect();
             let cursor_in_link = cursor_on_this_line && cc >= *bs && cc < *be;
-            let show_raw = !conceal || cursor_in_link;
             let link_style = if cursor_in_link {
                 theme::link_selected()
             } else {
                 theme::link()
             };
 
-            if show_raw {
-                buf.set_string(inner.x + visual_col, y, &raw, link_style);
-                let raw_w = (*be - *bs) as u16;
-                if cursor_in_link {
-                    cursor_screen = Some((inner.x + visual_col + (cc - *bs) as u16, y));
-                }
-                visual_col += raw_w;
-            } else {
-                let display = link_display(&raw);
-                buf.set_string(inner.x + visual_col, y, &display, link_style);
-                visual_col += display.chars().count() as u16;
+            buf.set_string(inner.x + visual_col, y, &raw, link_style);
+            if cursor_in_link {
+                cursor_screen = Some((inner.x + visual_col + (cc - *bs) as u16, y));
             }
+            visual_col += (*be - *bs) as u16;
             last_end = *be;
         }
 
@@ -416,19 +418,6 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     {
         f.set_cursor_position(ratatui::layout::Position { x: cx, y: cy });
     }
-}
-
-fn link_display(raw: &str) -> String {
-    if raw.len() < 4 {
-        return raw.to_string();
-    }
-    let inner = &raw[2..raw.len() - 2];
-    let inner = inner.trim();
-    if let Some(idx) = inner.find('|') {
-        return inner[idx + 1..].trim().to_string();
-    }
-    let t = inner.split('#').next().unwrap_or(inner);
-    t.trim().to_string()
 }
 
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -948,6 +937,27 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains('●'), "a dirty marker should be visible");
         assert!(text.contains('A') && text.contains('B'), "both buffers listed");
+    }
+
+    #[test]
+    fn editor_conceals_markup_on_non_cursor_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Note.md"),
+            "# Big Title\n\nplain **bold** text\n",
+        )
+        .unwrap();
+        let mut app = load(dir.path());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.on_key(key(KeyCode::Enter));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("# Big Title"), "cursor line stays raw");
+        assert!(text.contains("bold"));
+        assert!(
+            !text.contains("**bold**"),
+            "markup hidden on non-cursor lines"
+        );
     }
 
     #[test]

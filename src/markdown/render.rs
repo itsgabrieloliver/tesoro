@@ -59,6 +59,7 @@ struct Builder<F: Fn(&str) -> bool> {
     list: Vec<Option<u64>>,
     bq: usize,
     code: bool,
+    callout: Option<ratatui::style::Color>,
     pending: String,
     table: Option<TableBuf>,
     links: Vec<LinkMeta>,
@@ -75,6 +76,7 @@ impl<F: Fn(&str) -> bool> Builder<F> {
             list: Vec::new(),
             bq: 0,
             code: false,
+            callout: None,
             pending: String::new(),
             table: None,
             links: Vec::new(),
@@ -94,9 +96,13 @@ impl<F: Fn(&str) -> bool> Builder<F> {
         }
         let mut line = Vec::new();
         if self.bq > 0 {
+            let style = match self.callout {
+                Some(c) => Style::default().fg(c),
+                None => theme::muted(),
+            };
             line.push(Seg {
                 text: "│ ".repeat(self.bq),
-                style: theme::muted(),
+                style,
                 link: None,
             });
         }
@@ -148,7 +154,14 @@ impl<F: Fn(&str) -> bool> Builder<F> {
         }
         if matches!(ev, Event::SoftBreak) {
             if !self.code {
-                self.pending.push(' ');
+                if self.bq > 0
+                    && self.callout.is_none()
+                    && self.pending.trim_start().starts_with("[!")
+                {
+                    self.flush_pending();
+                } else {
+                    self.pending.push(' ');
+                }
             }
             return;
         }
@@ -270,7 +283,12 @@ impl<F: Fn(&str) -> bool> Builder<F> {
                     });
                 }
             }
-            TagEnd::BlockQuote(_) => self.bq = self.bq.saturating_sub(1),
+            TagEnd::BlockQuote(_) => {
+                self.bq = self.bq.saturating_sub(1);
+                if self.bq == 0 {
+                    self.callout = None;
+                }
+            }
             TagEnd::CodeBlock => {
                 self.flush();
                 self.code = false;
@@ -407,6 +425,32 @@ impl<F: Fn(&str) -> bool> Builder<F> {
             return;
         }
         let text = std::mem::take(&mut self.pending);
+        if self.bq > 0
+            && self.callout.is_none()
+            && let Some(rest) = text.trim_start().strip_prefix("[!")
+            && let Some(close) = rest.find(']')
+        {
+            let kind = rest[..close].to_ascii_lowercase();
+            let (icon, color) = theme::callout(&kind);
+            self.callout = Some(color);
+            let title_rest = rest[close + 1..].trim().to_string();
+            let title = if title_rest.is_empty() {
+                let mut t = kind;
+                if let Some(f) = t.get_mut(0..1) {
+                    f.make_ascii_uppercase();
+                }
+                t
+            } else {
+                title_rest
+            };
+            self.cur.push(Seg {
+                text: format!("{icon} {title}"),
+                style: Style::default().fg(color).add_modifier(Modifier::BOLD),
+                link: None,
+            });
+            self.flush();
+            return;
+        }
         let style = self.cur_style();
         for piece in inline::scan(&text) {
             match piece {
@@ -415,11 +459,30 @@ impl<F: Fn(&str) -> bool> Builder<F> {
                     style,
                     link: None,
                 }),
-                Inline::Tag(r) => self.cur.push(Seg {
-                    text: text[r].to_string(),
-                    style: theme::tag(),
+                Inline::Tag(r) => {
+                    let name = text[r.clone()].trim_start_matches('#').to_string();
+                    self.cur.push(Seg {
+                        text: text[r].to_string(),
+                        style: theme::tag_for(&name),
+                        link: None,
+                    })
+                }
+                Inline::Highlight(s) => self.cur.push(Seg {
+                    text: s,
+                    style: style.patch(theme::highlight()),
                     link: None,
                 }),
+                Inline::Color { spec, text: t } => {
+                    let st = match theme::named_color(&spec) {
+                        Some(c) => style.fg(c),
+                        None => style,
+                    };
+                    self.cur.push(Seg {
+                        text: t,
+                        style: st,
+                        link: None,
+                    })
+                }
                 Inline::Wikilink(data) => {
                     let display = data.alias.clone().unwrap_or_else(|| data.target.clone());
                     let resolved = (self.resolves)(&data.target);
@@ -457,7 +520,7 @@ impl<F: Fn(&str) -> bool> Builder<F> {
     }
 }
 
-fn heading_style(level: HeadingLevel) -> Style {
+pub(crate) fn heading_style(level: HeadingLevel) -> Style {
     use HeadingLevel::*;
     let base = Style::default().add_modifier(Modifier::BOLD);
     match level {
@@ -754,6 +817,58 @@ mod tests {
         let h6 = heading_style(HeadingLevel::H6);
         assert_ne!(h1.fg, h3.fg);
         assert!(h6.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn highlights_and_color_spans_render_styled() {
+        let r = render("==hot== and {red:fire}", 80, |_| false);
+        let joined: String = r.lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("hot") && !joined.contains("=="));
+        assert!(joined.contains("fire") && !joined.contains("{red:"));
+        assert!(
+            r.lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.style.bg == Some(theme::HL_BG)),
+            "highlight background applied"
+        );
+        assert!(
+            r.lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.style.fg == Some(theme::DANGER)),
+            "red color span applied"
+        );
+    }
+
+    #[test]
+    fn tags_get_distinct_palette_colors() {
+        let r = render("#a #b", 80, |_| false);
+        let fgs: Vec<_> = r
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .filter(|s| s.content.starts_with('#'))
+            .map(|s| s.style.fg)
+            .collect();
+        assert_eq!(fgs.len(), 2);
+        assert_ne!(fgs[0], fgs[1]);
+    }
+
+    #[test]
+    fn callout_renders_icon_title_and_colored_border() {
+        let r = render("> [!tip] Hydrate\n> drink water\n", 80, |_| false);
+        let joined: String = r.lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("✓ Hydrate"));
+        assert!(joined.contains("drink water"));
+        assert!(!joined.contains("[!tip]"));
+        assert!(
+            r.lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.content.contains('│') && s.style.fg == Some(theme::SUCCESS)),
+            "callout border takes the callout color"
+        );
     }
 
     #[test]
