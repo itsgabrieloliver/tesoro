@@ -1,6 +1,8 @@
+mod conceal;
 mod inline;
 mod render;
 
+pub use conceal::conceal_line;
 pub use render::{RenderedNote, render};
 
 pub fn wikilink_targets(text: &str) -> Vec<String> {

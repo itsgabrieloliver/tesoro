@@ -128,6 +128,9 @@ pub enum SlashKind {
     Table,
     Quote,
     Divider,
+    Highlight,
+    ColorSpan,
+    Callout,
 }
 
 #[derive(Clone)]
@@ -156,6 +159,9 @@ pub fn slash_items() -> Vec<SlashItem> {
         SlashItem { label: "table", description: "insert a 2x2 table skeleton", kind: SlashKind::Table },
         SlashItem { label: "quote", description: "insert > blockquote", kind: SlashKind::Quote },
         SlashItem { label: "divider", description: "insert --- horizontal rule", kind: SlashKind::Divider },
+        SlashItem { label: "highlight", description: "wrap text in ==highlight==", kind: SlashKind::Highlight },
+        SlashItem { label: "color", description: "insert {color:text} span", kind: SlashKind::ColorSpan },
+        SlashItem { label: "callout", description: "insert > [!note] callout", kind: SlashKind::Callout },
     ]
 }
 
@@ -1011,6 +1017,27 @@ impl App {
             SlashKind::Divider => {
                 if let Some(o) = self.open.as_mut() {
                     o.textarea.insert_str("\n---\n");
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Highlight => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("====");
+                    o.textarea.move_cursor(CursorMove::Back);
+                    o.textarea.move_cursor(CursorMove::Back);
+                    o.dirty = true;
+                }
+            }
+            SlashKind::ColorSpan => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("{accent:}");
+                    o.textarea.move_cursor(CursorMove::Back);
+                    o.dirty = true;
+                }
+            }
+            SlashKind::Callout => {
+                if let Some(o) = self.open.as_mut() {
+                    o.textarea.insert_str("> [!note] ");
                     o.dirty = true;
                 }
             }
@@ -3021,6 +3048,14 @@ mod tests {
         assert!(app.open.is_some(), ":q must not close a dirty buffer");
         app.run_ex_command("q!");
         assert!(app.open.is_none(), ":q! force-closes");
+    }
+
+    #[test]
+    fn slash_menu_includes_styling_commands() {
+        let labels: Vec<&str> = slash_items().iter().map(|i| i.label).collect();
+        for l in ["highlight", "color", "callout"] {
+            assert!(labels.contains(&l), "missing slash command {l}");
+        }
     }
 
     #[test]
