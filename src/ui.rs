@@ -1,6 +1,7 @@
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
@@ -319,76 +320,53 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let mode = o.mode;
     let conceal = selection.is_none() && matches!(mode, EditMode::Normal | EditMode::Insert);
 
-    let cr_u16 = cr as u16;
-    if cr_u16 < o.editor_top {
-        o.editor_top = cr_u16;
+    let lines: Vec<String> = o.textarea.lines().to_vec();
+    let plan = markdown::editor_plan(&lines, cr, inner.width as usize, conceal);
+
+    let cursor_drow = plan
+        .iter()
+        .position(|row| {
+            row.src == Some(cr) && matches!(row.kind, markdown::RowKind::Detailed { .. })
+        })
+        .or_else(|| plan.iter().position(|row| row.src == Some(cr)))
+        .unwrap_or(0) as u16;
+    if cursor_drow < o.editor_top {
+        o.editor_top = cursor_drow;
     }
-    if inner.height > 0 && cr_u16 >= o.editor_top + inner.height {
-        o.editor_top = cr_u16 + 1 - inner.height;
+    if inner.height > 0 && cursor_drow >= o.editor_top + inner.height {
+        o.editor_top = cursor_drow + 1 - inner.height;
     }
     let top = o.editor_top as usize;
-    let lines: Vec<String> = o.textarea.lines().to_vec();
 
     let buf = f.buffer_mut();
     let mut cursor_screen: Option<(u16, u16)> = None;
 
-    let row_count = (inner.height as usize).min(lines.len().saturating_sub(top));
+    let row_count = (inner.height as usize).min(plan.len().saturating_sub(top));
     for r in 0..row_count {
-        let line_idx = top + r;
+        let row = &plan[top + r];
         let y = inner.y + r as u16;
-        let line = &lines[line_idx];
-        let chars: Vec<char> = line.chars().collect();
-        let links = crate::markdown::wikilink_positions(line);
-        let cursor_on_this_line = line_idx == cr;
-
-        if conceal && !cursor_on_this_line {
-            let mut x = inner.x;
-            for (txt, st) in crate::markdown::conceal_line(line) {
-                buf.set_string(x, y, &txt, st);
-                x += UnicodeWidthStr::width(txt.as_str()) as u16;
-            }
-            continue;
-        }
-
-        let mut visual_col: u16 = 0;
-        let mut last_end: usize = 0;
-
-        for (bs, be, _target) in &links {
-            if *bs > last_end {
-                if cursor_on_this_line
-                    && cc >= last_end
-                    && cc < *bs
-                    && cursor_screen.is_none()
-                {
-                    cursor_screen =
-                        Some((inner.x + visual_col + (cc - last_end) as u16, y));
+        match &row.kind {
+            markdown::RowKind::Spans(spans) => {
+                let mut x = inner.x;
+                for (txt, st) in spans {
+                    buf.set_string(x, y, txt, *st);
+                    x += UnicodeWidthStr::width(txt.as_str()) as u16;
                 }
-                let segment: String = chars[last_end..*bs].iter().collect();
-                buf.set_string(inner.x + visual_col, y, &segment, theme::text());
-                visual_col += (*bs - last_end) as u16;
             }
-            let raw: String = chars[*bs..*be].iter().collect();
-            let cursor_in_link = cursor_on_this_line && cc >= *bs && cc < *be;
-            let link_style = if cursor_in_link {
-                theme::link_selected()
-            } else {
-                theme::link()
-            };
-
-            buf.set_string(inner.x + visual_col, y, &raw, link_style);
-            if cursor_in_link {
-                cursor_screen = Some((inner.x + visual_col + (cc - *bs) as u16, y));
+            markdown::RowKind::Detailed { base } => {
+                let src = row.src.unwrap_or(0);
+                let is_cursor = row.src == Some(cr);
+                paint_source_line(
+                    buf,
+                    inner,
+                    y,
+                    &lines[src],
+                    is_cursor,
+                    cc,
+                    *base,
+                    &mut cursor_screen,
+                );
             }
-            visual_col += (*be - *bs) as u16;
-            last_end = *be;
-        }
-
-        if cursor_on_this_line && cc >= last_end && cursor_screen.is_none() {
-            cursor_screen = Some((inner.x + visual_col + (cc - last_end) as u16, y));
-        }
-        if last_end < chars.len() {
-            let trailing: String = chars[last_end..].iter().collect();
-            buf.set_string(inner.x + visual_col, y, &trailing, theme::text());
         }
     }
 
@@ -417,6 +395,55 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
         && let Some((cx, cy)) = cursor_screen
     {
         f.set_cursor_position(ratatui::layout::Position { x: cx, y: cy });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_source_line(
+    buf: &mut Buffer,
+    inner: Rect,
+    y: u16,
+    line: &str,
+    is_cursor: bool,
+    cc: usize,
+    base: Style,
+    cursor_screen: &mut Option<(u16, u16)>,
+) {
+    let chars: Vec<char> = line.chars().collect();
+    let links = markdown::wikilink_positions(line);
+    let mut visual_col: u16 = 0;
+    let mut last_end: usize = 0;
+
+    for (bs, be, _target) in &links {
+        if *bs > last_end {
+            if is_cursor && cc >= last_end && cc < *bs && cursor_screen.is_none() {
+                *cursor_screen = Some((inner.x + visual_col + (cc - last_end) as u16, y));
+            }
+            let segment: String = chars[last_end..*bs].iter().collect();
+            buf.set_string(inner.x + visual_col, y, &segment, base);
+            visual_col += (*bs - last_end) as u16;
+        }
+        let raw: String = chars[*bs..*be].iter().collect();
+        let cursor_in_link = is_cursor && cc >= *bs && cc < *be;
+        let link_style = if cursor_in_link {
+            theme::link_selected()
+        } else {
+            theme::link()
+        };
+        buf.set_string(inner.x + visual_col, y, &raw, link_style);
+        if cursor_in_link {
+            *cursor_screen = Some((inner.x + visual_col + (cc - *bs) as u16, y));
+        }
+        visual_col += (*be - *bs) as u16;
+        last_end = *be;
+    }
+
+    if is_cursor && cc >= last_end && cursor_screen.is_none() {
+        *cursor_screen = Some((inner.x + visual_col + (cc - last_end) as u16, y));
+    }
+    if last_end < chars.len() {
+        let trailing: String = chars[last_end..].iter().collect();
+        buf.set_string(inner.x + visual_col, y, &trailing, base);
     }
 }
 

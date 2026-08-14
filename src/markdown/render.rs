@@ -532,7 +532,7 @@ pub(crate) fn heading_style(level: HeadingLevel) -> Style {
     }
 }
 
-fn heading_underline(level: HeadingLevel) -> Option<(char, Style)> {
+pub(crate) fn heading_underline(level: HeadingLevel) -> Option<(char, Style)> {
     match level {
         HeadingLevel::H1 => Some(('═', Style::default().fg(theme::EMPH))),
         HeadingLevel::H2 => Some(('─', Style::default().fg(theme::MUTED))),
